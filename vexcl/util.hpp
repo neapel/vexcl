@@ -33,7 +33,7 @@ THE SOFTWARE.
 
 #ifdef WIN32
 #  pragma warning(push)
-#  pragma warning(disable : 4267 4290)
+#  pragma warning(disable : 4267 4290 4800)
 #  define NOMINMAX
 #endif
 
@@ -93,11 +93,16 @@ CL_TYPES(char);  CL_TYPES(uchar);
 CL_TYPES(short); CL_TYPES(ushort);
 CL_TYPES(int);   CL_TYPES(uint);
 CL_TYPES(long);  CL_TYPES(ulong);
+
+// char and cl_char are different types. Hence, special handling is required:
+template <> inline std::string type_name<char>() { return "char"; } \
+template <> struct is_cl_native<char> : std::true_type {};
+
 #undef CL_TYPES
 #undef CL_VEC_TYPE
 #undef STRINGIFY
 
-#if defined(__clang__) && defined(__APPLE__)
+#if defined(__APPLE__)
 template <> inline std::string type_name<size_t>() {
     return std::numeric_limits<std::size_t>::max() ==
         std::numeric_limits<uint>::max() ? "uint" : "ulong";
@@ -215,69 +220,96 @@ inline cl::Device qdev(const cl::CommandQueue& q) {
 
 /// Checks if the compute device is CPU.
 inline bool is_cpu(const cl::Device &d) {
-    return d.getInfo<CL_DEVICE_TYPE>() == CL_DEVICE_TYPE_CPU;
+    return d.getInfo<CL_DEVICE_TYPE>() & CL_DEVICE_TYPE_CPU;
 }
 
+enum device_options_kind {
+    compile_options,
+    program_header
+};
+
 /// Global program options holder
-template <bool dummy>
-struct program_options {
-    static_assert(dummy, "dummy parameter should be true");
+template <device_options_kind kind>
+struct device_options {
+    static const std::string& get(const cl::Device &dev) {
+        if (options[dev()].empty()) options[dev()].push_back("");
 
-    static const std::string& get_options(const cl::Device &dev) {
-        return options[dev()];
+        return options[dev()].back();
     }
 
-    static const std::string& get_header(const cl::Device &dev) {
-        return header[dev()];
+    static void push(const cl::Device &dev, const std::string &str) {
+        options[dev()].push_back(str);
     }
 
-    static void set_options(const cl::Device &dev, const std::string &str) {
-        options[dev()] = str;
-    }
-
-    static void set_header(const cl::Device &dev, const std::string &str) {
-        header[dev()] = str;
+    static void pop(const cl::Device &dev) {
+        if (!options[dev()].empty()) options[dev()].pop_back();
     }
 
     private:
-        static std::map<cl_device_id, std::string> options;
-        static std::map<cl_device_id, std::string> header;
+        static std::map<cl_device_id, std::vector<std::string> > options;
 };
 
-template <bool dummy>
-std::map<cl_device_id, std::string> program_options<dummy>::options;
+template <device_options_kind kind>
+std::map<cl_device_id, std::vector<std::string> > device_options<kind>::options;
 
-template <bool dummy>
-std::map<cl_device_id, std::string> program_options<dummy>::header;
-
-inline std::string get_program_options(const cl::Device &dev) {
-    return program_options<true>::get_options(dev);
+inline std::string get_compile_options(const cl::Device &dev) {
+    return device_options<compile_options>::get(dev);
 }
 
 inline std::string get_program_header(const cl::Device &dev) {
-    return program_options<true>::get_header(dev);
+    return device_options<program_header>::get(dev);
 }
 
 /// Set global OpenCL compilation options for a given device.
-inline void set_program_options(const cl::Device &dev, const std::string &str) {
-    program_options<true>::set_options(dev, str);
+/**
+ * This replaces any previously set options. To roll back, call
+ * pop_compile_options().
+ */
+inline void push_compile_options(const cl::Device &dev, const std::string &str) {
+    device_options<compile_options>::push(dev, str);
+}
+
+/// Rolls back changes to compile options.
+inline void pop_compile_options(const cl::Device &dev) {
+    device_options<compile_options>::pop(dev);
 }
 
 /// Set global OpenCL program header for a given device.
-inline void set_program_header(const cl::Device &dev, const std::string &str) {
-    program_options<true>::set_header(dev, str);
+/**
+ * This replaces any previously set header. To roll back, call
+ * pop_program_header().
+ */
+inline void push_program_header(const cl::Device &dev, const std::string &str) {
+    device_options<program_header>::push(dev, str);
+}
+
+/// Rolls back changes to compile options.
+inline void pop_program_header(const cl::Device &dev) {
+    device_options<program_header>::pop(dev);
 }
 
 /// Set global OpenCL compilation options for each device in queue list.
-inline void set_program_options(const std::vector<cl::CommandQueue> &queue, const std::string &str) {
+inline void push_compile_options(const std::vector<cl::CommandQueue> &queue, const std::string &str) {
     for(auto q = queue.begin(); q != queue.end(); ++q)
-        program_options<true>::set_options(qdev(*q), str);
+        device_options<compile_options>::push(qdev(*q), str);
+}
+
+/// Rolls back changes to compile options for each device in queue list.
+inline void pop_compile_options(const std::vector<cl::CommandQueue> &queue) {
+    for(auto q = queue.begin(); q != queue.end(); ++q)
+        device_options<compile_options>::pop(qdev(*q));
 }
 
 /// Set global OpenCL program header for each device in queue list.
-inline void set_program_header(const std::vector<cl::CommandQueue> &queue, const std::string &str) {
+inline void push_program_header(const std::vector<cl::CommandQueue> &queue, const std::string &str) {
     for(auto q = queue.begin(); q != queue.end(); ++q)
-        program_options<true>::set_header(qdev(*q), str);
+        device_options<program_header>::push(qdev(*q), str);
+}
+
+/// Rolls back changes to compile options for each device in queue list.
+inline void pop_program_header(const std::vector<cl::CommandQueue> &queue) {
+    for(auto q = queue.begin(); q != queue.end(); ++q)
+        device_options<program_header>::pop(qdev(*q));
 }
 
 inline std::string standard_kernel_header(const cl::Device &dev) {
@@ -307,7 +339,7 @@ inline cl::Program build_sources(
     auto device = context.getInfo<CL_CONTEXT_DEVICES>();
 
     try {
-        program.build(device, (options + " " + get_program_options(device[0])).c_str());
+        program.build(device, (options + " " + get_compile_options(device[0])).c_str());
     } catch(const cl::Error&) {
         std::cerr << source
                   << std::endl
@@ -361,6 +393,16 @@ struct column_owner {
             - part.begin() - 1;
     }
 };
+
+/// Helper function for generating LocalSpaceArg objects.
+/**
+ * This is a copy of cl::Local that is absent is some of cl.hpp versions.
+ */
+inline cl::LocalSpaceArg
+Local(size_t size) {
+    cl::LocalSpaceArg ret = { size };
+    return ret;
+}
 
 } // namespace vex
 

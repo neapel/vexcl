@@ -471,15 +471,15 @@ void stencil<T>::init(uint width) {
         if (is_cpu(device) || available_lmem < width + 64 + lhalo + rhalo) {
             conv[d]  = slow_conv[context()];
             wgs[d]   = wgsize[context()];
-            loc_s[d] = cl::Local(1);
-            loc_x[d] = cl::Local(1);
+            loc_s[d] = vex::Local(1);
+            loc_x[d] = vex::Local(1);
         } else {
             conv[d] = fast_conv[context()];
             wgs[d]  = wgsize[context()];
             while(available_lmem < width + wgs[d] + lhalo + rhalo)
                 wgs[d] /= 2;
-            loc_s[d] = cl::Local(sizeof(T) * width);
-            loc_x[d] = cl::Local(sizeof(T) * (wgs[d] + lhalo + rhalo));
+            loc_s[d] = vex::Local(sizeof(T) * width);
+            loc_x[d] = vex::Local(sizeof(T) * (wgs[d] + lhalo + rhalo));
         }
 
     }
@@ -668,31 +668,7 @@ StencilOperator<T, width, center, Impl>::StencilOperator(
                 "    real alpha, real beta,\n"
                 "    local real *X\n"
                 "    )\n"
-                "{\n";
-            if ( is_cpu(device) ) {
-                source <<
-                "    int l_id       = get_local_id(0);\n"
-                "    int block_size = get_local_size(0);\n"
-                "    long g_id      = get_global_id(0);\n"
-                "    for(int i = 0, j = g_id - lhalo; i < 1 + lhalo + rhalo; i++, j++)\n"
-                "        X[i] = read_x(j, n, has_left, has_right, lhalo, rhalo, xloc, xrem);\n";
-#if defined(__APPLE__)
-                // TODO: this is only a temporary hack. Need to look at
-                // stencils on CPUs anyway.
-                source <<
-                "    barrier(CLK_LOCAL_MEM_FENCE);\n";
-#endif
-                source <<
-                "    if (g_id < n) {\n"
-                "        real sum = stencil_oper(X + lhalo);\n"
-                "        if (alpha)\n"
-                "            y[g_id] = alpha * y[g_id] + beta * sum;\n"
-                "        else\n"
-                "            y[g_id] = beta * sum;\n"
-                "    }\n"
-                "}\n";
-            } else {
-                source <<
+                "{\n"
                 "    size_t grid_size = get_global_size(0);\n"
                 "    int l_id         = get_local_id(0);\n"
                 "    int block_size   = get_local_size(0);\n"
@@ -710,7 +686,6 @@ StencilOperator<T, width, center, Impl>::StencilOperator(
                 "        barrier(CLK_LOCAL_MEM_FENCE);\n"
                 "    }\n"
                 "}\n";
-            }
 
             auto program = build_sources(context, source.str());
 
@@ -727,7 +702,7 @@ StencilOperator<T, width, center, Impl>::StencilOperator(
             while(available_lmem < width + wgsize[context()])
                 wgsize[context()] /= 2;
 
-            lmem[context()] = cl::Local(sizeof(T) * (wgsize[context()] + width - 1));
+            lmem[context()] = vex::Local(sizeof(T) * (wgsize[context()] + width - 1));
         }
 
     }

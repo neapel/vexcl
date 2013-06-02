@@ -19,6 +19,22 @@ BOOST_AUTO_TEST_CASE(assign_expression)
             });
 }
 
+BOOST_AUTO_TEST_CASE(compound_assignment)
+{
+    const size_t n = 1024;
+
+    vex::vector<double> x(ctx, n);
+
+    x = 0;
+    x += 1;
+
+    check_sample(x, [](size_t, double a) { BOOST_CHECK(a == 1); });
+
+    x -= 2;
+
+    check_sample(x, [](size_t, double a) { BOOST_CHECK(a == -1); });
+}
+
 BOOST_AUTO_TEST_CASE(reduce_expression)
 {
     const size_t N = 1024;
@@ -136,7 +152,7 @@ BOOST_AUTO_TEST_CASE(custom_header)
 
     vex::vector<int> x(ctx, n);
 
-    vex::set_program_header(ctx, "#define THE_ANSWER 42\n");
+    vex::push_program_header(ctx, "#define THE_ANSWER 42\n");
 
     VEX_FUNCTION(answer, int(int), "return prm1 * THE_ANSWER;");
 
@@ -145,6 +161,44 @@ BOOST_AUTO_TEST_CASE(custom_header)
     check_sample(x, [](size_t, int a) {
             BOOST_CHECK(a == 42);
             });
+
+    vex::pop_program_header(ctx);
+}
+
+BOOST_AUTO_TEST_CASE(function_with_preamble)
+{
+    const size_t n = 1024;
+
+    vex::vector<double> x(ctx, random_vector<double>(n));
+    vex::vector<double> y(ctx, n);
+
+    VEX_FUNCTION_WITH_PREAMBLE(one, double(double),
+            "double sin2(double x) { return pow(sin(x), 2.0); }\n"
+            "double cos2(double x) { return pow(cos(x), 2.0); }\n",
+            "return sin2(prm1) + cos2(prm1);"
+            );
+
+    y = one(x);
+
+    check_sample(y, [](size_t, double a) {
+            BOOST_CHECK_CLOSE(a, 1.0, 1e-8);
+            });
+}
+
+BOOST_AUTO_TEST_CASE(combine_expressions)
+{
+
+    const size_t n = 1024;
+
+    vex::vector<int> x(ctx, n);
+
+    auto alpha  = 2 * M_PI * vex::element_index();
+    auto sine   = sin(alpha);
+    auto cosine = cos(alpha);
+
+    x = pow(sine, 2.0) + pow(cosine, 2.0);
+
+    check_sample(x, [](size_t, double v) { BOOST_CHECK_CLOSE(v, 1.0, 1e-8); });
 }
 
 BOOST_AUTO_TEST_SUITE_END()

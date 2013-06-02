@@ -56,25 +56,30 @@ THE SOFTWARE.
 namespace vex {
 
 /// \cond INTERNAL
-struct elem_index {
-    size_t offset;
+/// Assignment operators.
+namespace assign {
 
-    elem_index(size_t offset = 0) : offset(offset) {}
-};
+#define ASSIGN_OP(name, op) \
+    struct name { \
+        static std::string string() { \
+            return #op; \
+        } \
+    };
 
-template <>
-inline std::string type_name<elem_index>() {
-    return type_name<size_t>();
+    ASSIGN_OP(SET, =);
+    ASSIGN_OP(ADD, +=);
+    ASSIGN_OP(SUB, -=);
+    ASSIGN_OP(MUL, *=);
+    ASSIGN_OP(DIV, /=);
+    ASSIGN_OP(MOD, %=);
+    ASSIGN_OP(AND, &=);
+    ASSIGN_OP(OR,  |=);
+    ASSIGN_OP(XOR, ^=);
+    ASSIGN_OP(LSH, <<=);
+    ASSIGN_OP(RSH, >>=);
+
+#undef ASSIGN_OP
 }
-/// \endcond
-
-/// When used in vector expression, returns current element index plus offset.
-inline boost::proto::result_of::as_expr<elem_index>::type
-element_index(size_t offset = 0) {
-    return boost::proto::as_expr(elem_index(offset));
-}
-
-/// \cond INTERNAL
 
 /// Type trait to determine if an expression is scalable.
 /**
@@ -379,8 +384,13 @@ struct UserFunction<Impl, RetType(ArgType...)> : user_function
                 );
     }
 
+    static std::string preamble() {
+        return "";
+    }
+
     static void define(std::ostream &os, const std::string &name) {
-        os << type_name<RetType>() << " " << name << "(";
+        os << Impl::preamble() << "\n"
+           << type_name<RetType>() << " " << name << "(";
         show_arg<ArgType...>(os, 1);
         os << "\n)\n{\n" << Impl::body() << "\n}\n\n";
     }
@@ -424,8 +434,12 @@ struct UserFunction<Impl, RetType( BOOST_PP_ENUM_PARAMS(n, ArgType) )> : user_fu
                 Impl(), BOOST_PP_ENUM(n, PRINT_BOOST_REF, ~) \
                 ); \
     } \
+    static std::string preamble() { \
+        return ""; \
+    } \
     static void define(std::ostream &os, const std::string &name) { \
-        os << type_name<RetType>() << " " << name << "(" \
+        os << Impl::preamble() << "\n" \
+           << type_name<RetType>() << " " << name << "(" \
            BOOST_PP_REPEAT(n, PRINT_PRM_DEF, n) \
            << "\n)\n{\n" << Impl::body() << "\n}\n\n"; \
     } \
@@ -446,7 +460,7 @@ BOOST_PP_REPEAT_FROM_TO(1, VEXCL_MAX_ARITY, USER_FUNCTION, ~)
 /// Macro to declare a user function type.
 /**
  * \code
- * VEX_FUNCTION_TYPE(pow3_t, double(double), "return pow(prm1, 3.0);");
+ * VEX_FUNCTION_TYPE(pow3_t, double(double), "", "return pow(prm1, 3.0);");
  * pow3_t pow3;
  * output = pow3(input);
  * \endcode
@@ -455,9 +469,10 @@ BOOST_PP_REPEAT_FROM_TO(1, VEXCL_MAX_ARITY, USER_FUNCTION, ~)
  * save on OpenCL kernel recompilations). Otherwise VEX_FUNCTION should
  * be used locally.
  */
-#define VEX_FUNCTION_TYPE(name, signature, body_str) \
+#define VEX_FUNCTION_TYPE(name, signature, preamble_str, body_str) \
     struct name : vex::UserFunction<name, signature> { \
-        static std::string body() { return body_str; } \
+        static std::string preamble() { return preamble_str; } \
+        static std::string body()     { return body_str;     } \
     }
 
 /// Macro to declare a user function.
@@ -468,7 +483,23 @@ BOOST_PP_REPEAT_FROM_TO(1, VEXCL_MAX_ARITY, USER_FUNCTION, ~)
  * \endcode
  */
 #define VEX_FUNCTION(name, signature, body) \
-    VEX_FUNCTION_TYPE(user_function_##name##_body, signature, body) name
+    VEX_FUNCTION_TYPE(user_function_##name##_body, signature, "", body) name
+
+
+/// Macro to declare a user function with preamble.
+/**
+ * The preamble may be used to define helper functions or macros.
+ * \code
+ * VEX_FUNCTION_WITH_PREAMBLE(one, double(double),
+ *         "double sin2(double x) { return pow(sin(x), 2.0); }\n"
+ *         "double cos2(double x) { return pow(cos(x), 2.0); }\n",
+ *         "return sin2(prm1) + cos2(prm1);"
+ *         );
+ * y = one(x);
+ * \endcode
+ */
+#define VEX_FUNCTION_WITH_PREAMBLE(name, signature, preamble, body) \
+    VEX_FUNCTION_TYPE(user_function_##name##_body, signature, preamble, body) name
 
 
 /// \cond INTERNAL
@@ -556,17 +587,26 @@ struct extract_user_functions
 
 struct vector_terminal {};
 template <typename T> class vector;
+struct elem_index;
+
+// Terminals allowed in vector expressions.
+template <class Term, class Enable = void>
+struct is_vector_expr_terminal
+    : std::false_type
+{ };
+
+template <class T>
+struct is_vector_expr_terminal< T, typename std::enable_if< is_cl_native< T >::value >::type >
+    : std::true_type
+{ };
+
 
 //--- Vector grammar --------------------------------------------------------
 struct vector_expr_grammar
     : boost::proto::or_<
-          boost::proto::or_<
-              boost::proto::or_< boost::proto::terminal< elem_index > >, \
-              boost::proto::terminal< vector_terminal >,
-              boost::proto::and_<
-                  boost::proto::terminal< boost::proto::_ >,
-                  boost::proto::if_< is_cl_native< boost::proto::_value >() >
-              >
+          boost::proto::and_<
+              boost::proto::terminal< boost::proto::_ >,
+              boost::proto::if_< is_vector_expr_terminal< boost::proto::_value >() >
           >,
           BUILTIN_OPERATIONS(vector_expr_grammar),
           USER_FUNCTIONS(vector_expr_grammar)
@@ -611,7 +651,25 @@ struct vector_domain
         boost::proto::generator<vector_expression>,
         vector_full_grammar
         >
-{ };
+{
+    // Store everything by value inside expressions...
+    template <typename T, class Enable = void>
+    struct as_child : proto_base_domain::as_expr<T>
+    {};
+
+    // ... except for vectors to avoid data copying.
+    template <typename T>
+    struct as_child< T,
+        typename std::enable_if<
+                boost::proto::matches<
+                    typename boost::proto::result_of::as_expr<T>::type,
+                    boost::proto::terminal< vector_terminal >
+                >::value
+            >::type
+        >
+        : proto_base_domain::as_child< T >
+    {};
+};
 
 template <class Expr>
 struct vector_expression
@@ -621,7 +679,19 @@ struct vector_expression
         : boost::proto::extends< Expr, vector_expression<Expr>, vector_domain>(expr) {}
 };
 
+/// \endcond
+
+/// \cond INTERNAL
 //--- Vector contexts and transform helpers ---------------------------------
+
+// Representation of a terminal in a kernel name
+template <class T, class Enable = void>
+struct kernel_name {
+    static std::string get() {
+        return "term_";
+    }
+};
+
 
 // Builds kernel name for a vector expression.
 struct vector_name_context {
@@ -687,12 +757,22 @@ struct vector_name_context {
     struct eval<Expr, boost::proto::tag::terminal> {
         typedef void result_type;
 
-        void operator()(const Expr &, vector_name_context &ctx) const {
-            ctx.os << "term_";
+        template <typename Term>
+        void operator()(const Term&, vector_name_context &ctx) const {
+            ctx.os << kernel_name<Term>::get();
         }
     };
 };
 
+// Partial expression for a terminal:
+template <class Term, class Enable = void>
+struct partial_vector_expr {
+    static std::string get(int component, int position) {
+        std::ostringstream s;
+        s << "prm_" << component << "_" << position;
+        return s.str();
+    }
+};
 
 // Builds textual representation for a vector expression.
 struct vector_expr_context {
@@ -832,28 +912,9 @@ struct vector_expr_context {
     struct eval<Expr, boost::proto::tag::terminal> {
         typedef void result_type;
 
-        template <typename T>
-        void operator()(const vector<T> &, vector_expr_context &ctx) const {
-            ctx.os << "prm_" << ctx.cmp_idx << "_" << ++ctx.prm_idx << "[idx]";
-        }
-
         template <typename Term>
-        typename std::enable_if<
-            !std::is_same<typename boost::proto::result_of::value<Term>::type, elem_index>::value,
-            void
-        >::type
-        operator()(const Term &, vector_expr_context &ctx) const {
-            ctx.os << "prm_" << ctx.cmp_idx << "_" << ++ctx.prm_idx;
-        }
-
-        template <typename Term>
-        typename std::enable_if<
-            std::is_same<typename boost::proto::result_of::value<Term>::type, elem_index>::value,
-            void
-        >::type
-        operator()(const Term &, vector_expr_context &ctx) const {
-            ctx.os << "( prm_" << ctx.cmp_idx << "_" << ++ctx.prm_idx
-                   << " + idx )";
+        void operator()(const Term&, vector_expr_context &ctx) const {
+            ctx.os << partial_vector_expr<Term>::get(ctx.cmp_idx, ++ctx.prm_idx);
         }
     };
 };
@@ -876,25 +937,70 @@ struct declare_user_function {
         }
 };
 
+// Some terminals need preamble (e.g. struct declaration or helper function).
+// But most of them do not:
+template <class T>
+struct terminal_preamble {
+    static std::string get(int/*component*/, int/*position*/) { return ""; }
+};
+
+struct output_terminal_preamble {
+    std::ostream &os;
+    int cmp_idx;
+    mutable int prm_idx;
+
+    output_terminal_preamble(std::ostream &os, int cmp_idx = 1)
+        : os(os), cmp_idx(cmp_idx), prm_idx(0) {}
+
+        template <class Term>
+        void operator()(const Term&) const {
+            os << terminal_preamble<Term>::get(cmp_idx, ++prm_idx) << std::endl;
+        }
+};
+
+template <class Expr>
+void construct_preamble(const Expr &expr, std::ostream &kernel_source, int component = 1) {
+
+    extract_user_functions()(
+            boost::proto::as_child(expr),
+            declare_user_function(kernel_source, component)
+            );
+
+    extract_terminals()(
+            boost::proto::as_child(expr),
+            output_terminal_preamble(kernel_source, component)
+            );
+
+}
+
+template <class Term, class Enable = void>
+struct kernel_param_declaration {
+    static std::string get(int component, int position) {
+        std::ostringstream s;
+        s << type_name<typename boost::proto::result_of::value<Term>::type>()
+          << " prm_" << component << "_" << position;
+        return s.str();
+    }
+};
+
 struct declare_expression_parameter {
     std::ostream &os;
     int cmp_idx;
     mutable int prm_idx;
 
     declare_expression_parameter(std::ostream &os, int cmp_idx = 1)
-    : os(os), cmp_idx(cmp_idx), prm_idx(0) {}
+        : os(os), cmp_idx(cmp_idx), prm_idx(0) {}
 
     template <typename T>
-    void operator()(const vector<T> &) const {
-        os << ",\n\tglobal " << type_name<T>() << " *prm_"
-           << cmp_idx << "_" << ++prm_idx;
+    void operator()(const T&) const {
+        os << ",\n\t" << kernel_param_declaration<T>::get(cmp_idx, ++prm_idx);
     }
+};
 
-    template <typename Term>
-    void operator()(const Term &) const {
-        os << ",\n\t"
-           << type_name< typename boost::proto::result_of::value<Term>::type >()
-           << " prm_" << cmp_idx << "_" << ++prm_idx;
+template <class Term, class Enable = void>
+struct kernel_arg_setter {
+    static void set(cl::Kernel &kernel, uint/*device*/, size_t/*index_offset*/, uint &position, const Term &term) {
+        kernel.setArg(position++, boost::proto::value(term));
     }
 };
 
@@ -907,55 +1013,41 @@ struct set_expression_argument {
         : krn(krn), dev(dev), pos(pos), part_start(part_start) {}
 
     template <typename T>
-    void operator()(const vector<T> &term) const {
-        krn.setArg(pos++, term(dev));
-    }
-
-    template <typename Term>
-    typename std::enable_if<
-        !std::is_same<typename boost::proto::result_of::value<Term>::type, elem_index>::value,
-        void
-    >::type
-    operator()(const Term &term) const {
-        krn.setArg(pos++, boost::proto::value(term));
-    }
-
-    template <typename Term>
-    typename std::enable_if<
-        std::is_same<typename boost::proto::result_of::value<Term>::type, elem_index>::value,
-        void
-    >::type
-    operator()(const Term &term) const {
-        krn.setArg(pos++, boost::proto::value(term).offset + part_start);
+    void operator()(const T &term) const {
+        kernel_arg_setter<T>::set(krn, dev, part_start, pos, term);
     }
 };
 
+template <class T, class Enable = void>
+struct expression_properties {
+    static void get(const T &/*term*/,
+            std::vector<cl::CommandQueue> &/*queue_list*/,
+            std::vector<size_t> &/*partition*/,
+            size_t &/*size*/
+            )
+    { }
+};
+
 struct get_expression_properties {
-    mutable std::vector<cl::CommandQueue> const* queue;
-    mutable std::vector<size_t> const* part;
+    mutable std::vector<cl::CommandQueue> queue;
+    mutable std::vector<size_t> part;
     mutable size_t size;
 
-    get_expression_properties() : queue(0), part(0), size(0) {}
+    get_expression_properties() : size(0) {}
 
     size_t part_start(uint d) const {
-        return part ? (*part)[d] : 0;
+        return part.empty() ? 0 : part[d];
     }
 
     size_t part_size(uint d) const {
-        return part ? (*part)[d + 1] - (*part)[d] : 0;
+        return part.empty() ? 0 : part[d + 1] - part[d];
     }
 
     template <typename T>
-    void operator()(const vector<T> &term) const {
-        if (!queue) {
-            queue = &( term.queue_list() );
-            part  = &( term.partition() );
-            size  = term.size();
-        }
+    void operator()(const T &term) const {
+        if (queue.empty())
+            expression_properties<T>::get(term, queue, part, size);
     }
-
-    template <typename Term>
-    void operator()(const Term &) const { }
 };
 
 //---------------------------------------------------------------------------
@@ -1314,7 +1406,25 @@ struct multivector_domain
         boost::proto::generator<multivector_expression>,
         multivector_full_grammar
       >
-{ };
+{
+    // Store everything by value inside expressions...
+    template <typename T, class Enable = void>
+    struct as_child : proto_base_domain::as_expr<T>
+    {};
+
+    // ... except for vectors to avoid data copying.
+    template <typename T>
+    struct as_child< T,
+        typename std::enable_if<
+                boost::proto::matches<
+                    typename boost::proto::result_of::as_expr<T>::type,
+                    boost::proto::terminal< multivector_terminal >
+                >::value
+            >::type
+        >
+        : proto_base_domain::as_child< T >
+    {};
+};
 
 template <class Expr>
 struct multivector_expression

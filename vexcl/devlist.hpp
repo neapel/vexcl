@@ -42,6 +42,7 @@ THE SOFTWARE.
 #include <fstream>
 #include <tuple>
 #include <cstdlib>
+#include <random>
 #include <vexcl/util.hpp>
 #include <boost/interprocess/sync/file_lock.hpp>
 #include <boost/filesystem.hpp>
@@ -272,7 +273,7 @@ namespace Filter {
                         // lets make it writable by others:
                         try {
                             boost::filesystem::permissions(fname, boost::filesystem::all_all);
-                        } catch (const boost::filesystem::filesystem_error &e) {
+                        } catch (const boost::filesystem::filesystem_error&) {
                             (void)0;
                         }
                     }
@@ -291,7 +292,7 @@ namespace Filter {
                         // To process case 2 correctly, we try to lock the
                         // device a couple of times with a random pause.
 
-                        std::mt19937 rng(reinterpret_cast<size_t>(this));
+                        std::mt19937 rng(static_cast<unsigned long>(reinterpret_cast<size_t>(this)));
                         std::uniform_int_distribution<uint> rnd(0, 30);
 
                         for(int try_num = 0; try_num < 3; ++try_num) {

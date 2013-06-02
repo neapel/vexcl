@@ -50,6 +50,7 @@ THE SOFTWARE.
 #include <boost/multi_index/ordered_index.hpp>
 #include <boost/multi_index/sequenced_index.hpp>
 #include <boost/multi_index/global_fun.hpp>
+#include <boost/io/ios_state.hpp>
 
 #ifndef __CL_ENABLE_EXCEPTIONS
 #  define __CL_ENABLE_EXCEPTIONS
@@ -68,6 +69,7 @@ class profiler {
                 profile_unit(std::string name) : length(0), hit(0), name(name) {}
                 virtual ~profile_unit() {}
 
+                std::vector<double> deltas;
                 double length;
                 size_t hit;
                 std::string name;
@@ -87,6 +89,8 @@ class profiler {
                             boost::chrono::high_resolution_clock::now() - start).count();
 
                     length += delta;
+                    deltas.push_back(delta);
+                    std::stable_sort(deltas.begin(), deltas.end());
                     hit++;
 
                     return delta;
@@ -144,12 +148,18 @@ class profiler {
                         double time, double perc, uint width) const
                 {
                     using namespace std;
-                    out << name << ":";
-                    out << setw(width - name.size()) << "";
-                    out << setiosflags(ios::fixed);
-                    out << setw(10) << setprecision(3) << time << " sec.";
-                    out << "] (" << setprecision(2) << setw(6) << perc << "%)";
-                    if(hit > 1) out << " (" << hit << "x)";
+                    out << name << ":"
+                        << setw(width - name.size()) << ""
+                        << std::fixed
+                        << setw(10) << setprecision(3) << time << " sec."
+                        << "] (" << setprecision(2) << setw(6) << perc << "%)";
+                    if(hit > 1)
+                        out << " (" << setw(6) << hit
+                            << "x; mean:"
+                            << setprecision(2) << setw(10) << (time * 1e6 / hit)
+                            << "; med:"
+                            << setw(10) << (deltas[(deltas.size() - 1) / 2] * 1e6)
+                            << " usec.)";
                     out << endl;
                 }
             private:
@@ -220,6 +230,7 @@ class profiler {
          * \param name name of the measured interval.
          */
         void tic_cl(const std::string &name) {
+            assert(!queue.empty());
             tic(new cl_profile_unit(name, queue));
         }
 
@@ -238,6 +249,8 @@ class profiler {
 
         /// Outputs profile to the provided stream.
         void print(std::ostream &out) {
+            boost::io::ios_all_saver stream_state(out);
+
             if(stack.size() != 1)
                 out << "Warning! Profile is incomplete." << std::endl;
 
