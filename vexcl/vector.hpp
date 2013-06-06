@@ -531,7 +531,6 @@ class vector : public vector_terminal_expression {
             return part;
         }
 
-        /// Copies data from device vector.
         const vector& operator=(const vector &x) {
             if (&x != this) {
                 for(uint d = 0; d < queue.size(); d++)
@@ -808,8 +807,6 @@ class vector : public vector_terminal_expression {
                 if (kernel == cache.end()) {
                     std::ostringstream source;
 
-                    vector_expr_context expr_ctx(source);
-
                     std::ostringstream kernel_name;
                     vector_name_context name_ctx(kernel_name);
                     boost::proto::eval(boost::proto::as_child(expr), name_ctx);
@@ -842,6 +839,7 @@ class vector : public vector_terminal_expression {
 
                     source << "\t\tres[idx] " << OP::string() << " ";
 
+                    vector_expr_context expr_ctx(source);
                     boost::proto::eval(boost::proto::as_child(expr), expr_ctx);
 
                     source << ";\n\t}\n}\n";
@@ -875,6 +873,9 @@ class vector : public vector_terminal_expression {
                 }
             }
         }
+
+        template <typename S, size_t N, bool own>
+        friend class multivector;
 };
 
 //---------------------------------------------------------------------------
@@ -899,7 +900,7 @@ struct kernel_name< vector<T> > {
 
 template <typename T>
 struct partial_vector_expr< vector<T> > {
-    static std::string get(int component, int position) {
+    static std::string get(int component, int position, kernel_generator_state&) {
         std::ostringstream s;
         s << "prm_" << component << "_" << position << "[idx]";
         return s.str();
@@ -908,16 +909,18 @@ struct partial_vector_expr< vector<T> > {
 
 template <typename T>
 struct kernel_param_declaration< vector<T> > {
-    static std::string get(int component, int position) {
+    static std::string get(int component, int position, kernel_generator_state&) {
         std::ostringstream s;
-        s << "global " << type_name<T>() << " * prm_" << component << "_" << position;
+        s << ",\n\tglobal " << type_name<T>() << " * prm_" << component << "_" << position;
         return s.str();
     }
 };
 
 template <typename T>
 struct kernel_arg_setter< vector<T> > {
-    static void set(cl::Kernel &kernel, uint device, size_t/*index_offset*/, uint &position, const vector<T> &term) {
+    static void set(cl::Kernel &kernel, uint device, size_t/*index_offset*/,
+            uint &position, const vector<T> &term, kernel_generator_state&)
+    {
         kernel.setArg(position++, term(device));
     }
 };
@@ -1030,7 +1033,7 @@ inline double device_vector_perf(const cl::CommandQueue &q) {
     a = b + c;
 
     // Measure the second run.
-    profiler prof(queue);
+    profiler<> prof(queue);
     prof.tic_cl("");
     a = b + c;
     return 1.0 / prof.toc("");

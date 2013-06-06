@@ -1,5 +1,7 @@
 # VexCL
 
+[![Build Status](https://travis-ci.org/ddemidov/vexcl.png?branch=master)](https://travis-ci.org/ddemidov/vexcl)
+
 VexCL is a vector expression template library for OpenCL. It has been created
 for ease of OpenCL development with C++. VexCL strives to reduce amount of
 boilerplate code needed to develop OpenCL applications. The library provides
@@ -31,6 +33,7 @@ performance of several GPGPU libraries, including VexCL.
     * [Builtin operations](#builtin-operations)
     * [Element indices](#element-indices)
     * [User-defined functions](#user-defined-functions)
+    * [Tagged terminals](#tagged-terminals)
     * [Random number generation](#random-number-generation)
     * [Permutations](#permutations)
     * [Slicing](#slicing)
@@ -214,6 +217,11 @@ The resulting `squared_radius` function object is stateless; only its type is
 used for kernel generation. Hence, it is safe to put commonly used functions in
 global scope.
 
+Note that any valid vector expression may be passed as a function parameter:
+~~~{.cpp}
+Z = squared_radius(sin(X + Y), cos(X - Y));
+~~~
+
 Custom functions may be used not only for convenience, but also for performance
 reasons. The above example could in principle be rewritten as:
 ~~~{.cpp}
@@ -221,10 +229,20 @@ Z = sqrt(X * X + Y * Y);
 ~~~
 The drawback of the latter variant is that `X` and `Y` will be read _twice_.
 
-Note that any valid vector expression may be passed as a function parameter:
+### <a name="tagged-terminals"></a>Tagged terminals
+
+Code snippet from the last paragraph is ineffective because compiler can not
+tell if any two terminals in an expression tree are actually referring to the
+same data. But programmers often have this information. VexCL allows to pass
+this knowledge to compiler by tagging terminals with unique tags.  Programmer
+guarantees that any two terminals with matching tags are referencing same data.
+
+Below is more effective variant of the above example:
 ~~~{.cpp}
-Z = squared_radius(sin(X + Y), cos(X - Y));
+using vex::tag;
+Z = sqrt(tag<1>(X) * tag<1>(X) + tag<2>(Y) * tag<2>(Y));
 ~~~
+Here, the generated kernel will have one parameter per vectors `X` and `Y`.
 
 ### <a name="random-number-generation"></a>Random number generation
 

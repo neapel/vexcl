@@ -61,39 +61,139 @@ THE SOFTWARE.
 
 namespace vex {
 
+enum AvgKind {
+    AvgMean,
+    AvgMedian
+};
+
+template <AvgKind Avg>
+struct averager {};
+
+template <>
+struct averager<AvgMean> {
+    double sum;
+    size_t n;
+
+    averager() : sum(0), n(0) {}
+
+    inline void push(double val) {
+        sum += val;
+        ++n;
+    }
+
+    inline double value() const {
+        return sum / n;
+    }
+
+    inline double total() const {
+        return sum;
+    }
+
+    inline size_t size() const {
+        return n;
+    }
+};
+
+template <>
+struct averager<AvgMedian> {
+    double sum;
+    std::vector<double> values;
+
+    averager() : sum(0) {
+        values.reserve(32);
+    }
+
+    inline void push(double val) {
+        sum += val;
+        values.push_back(val);
+        std::stable_sort(values.begin(), values.end());
+    }
+
+    inline double value() const {
+        if (values.empty()) return 0;
+
+        return values[(values.size() - 1) / 2];
+    }
+
+    inline double total() const {
+        return sum;
+    }
+
+    inline size_t size() const {
+        return values.size();
+    }
+};
+
+/// A stopwatch that computes the median and mean of individual timings.
+/**
+ * \param Clock class that provides interface compatible with either
+ *              boost::chrono or std::chrono clocks.
+ * \param Avg   Kind of averaging used. AvgMedian is more stable, but may
+ *              have high overhead when profiling is made in a loop.
+ */
+template <class Clock = boost::chrono::high_resolution_clock, AvgKind Avg = AvgMedian>
+class stopwatch {
+    public:
+        averager<Avg> avg;
+
+        stopwatch() { tic(); }
+
+        /// Start timer.
+        inline void tic() {
+            start = Clock::now();
+        }
+
+        /// Stop timer, return elapsed time in seconds.
+        inline double toc() {
+            const double delta = seconds(start, Clock::now());
+
+            avg.push(delta);
+
+            return delta;
+        }
+
+        /// Return the average measured time in seconds.
+        inline double average() const {
+            return avg.value();
+        }
+
+        inline double total() const {
+            return avg.total();
+        }
+
+        inline size_t tics() const {
+            return avg.size();
+        }
+    private:
+        static double seconds(typename Clock::time_point begin, typename Clock::time_point end) {
+            return typename Clock::duration(end - begin).count() * 
+                static_cast<double>(Clock::duration::period::num) /
+                    Clock::duration::period::den;
+        }
+
+        typename Clock::time_point start;
+};
+
 /// Class for gathering and printing OpenCL and Host profiling info.
+/**
+ * \param Clock class that provides interface compatible with either
+ *              boost::chrono or std::chrono clocks.
+ * \param Avg   Kind of averaging used. AvgMedian is more stable, but may
+ *              have high overhead when profiling is made in a loop.
+ */
+template <class Clock = boost::chrono::high_resolution_clock, AvgKind Avg = AvgMedian>
 class profiler {
     private:
         class profile_unit {
             public:
-                profile_unit(std::string name) : length(0), hit(0), name(name) {}
+                profile_unit(std::string name) : watch(), name(name), children() {}
                 virtual ~profile_unit() {}
 
-                std::vector<double> deltas;
-                double length;
-                size_t hit;
+                stopwatch<Clock, Avg> watch;
                 std::string name;
-
-                boost::chrono::time_point<boost::chrono::high_resolution_clock> start;
 
                 static std::string _name(const std::shared_ptr<profile_unit> &u) {
                     return u->name;
-                }
-
-                virtual void tic() {
-                    start = boost::chrono::high_resolution_clock::now();
-                }
-
-                virtual double toc() {
-                    double delta = boost::chrono::duration<double>(
-                            boost::chrono::high_resolution_clock::now() - start).count();
-
-                    length += delta;
-                    deltas.push_back(delta);
-                    std::stable_sort(deltas.begin(), deltas.end());
-                    hit++;
-
-                    return delta;
                 }
 
                 boost::multi_index_container<
@@ -101,15 +201,23 @@ class profiler {
                     boost::multi_index::indexed_by<
                         boost::multi_index::sequenced<>,
                         boost::multi_index::ordered_unique<boost::multi_index::global_fun<
-                                const std::shared_ptr<profile_unit> &, std::string, _name>>
+                                const std::shared_ptr<profile_unit> &, std::string, profiler::profile_unit::_name>>
                     >
                 > children;
+
+                virtual void tic() {
+                    watch.tic();
+                }
+
+                virtual double toc() {
+                    return watch.toc();
+                }
 
                 double children_time() const {
                     double tm = 0;
 
                     for(auto c = children.begin(); c != children.end(); c++)
-                        tm += (*c)->length;
+                        tm += (*c)->watch.total();
 
                     return tm;
                 }
@@ -127,16 +235,19 @@ class profiler {
                         uint level, double total, uint width) const
                 {
                     using namespace std;
-                    out << "[" << setw(level) << "";
-                    print_line(out, name, length, 100 * length / total, width - level);
+                    print_line(out, name, watch.total(), 100 * watch.total() / total, width, level);
+
+                    out << " (" << setw(6) << watch.tics()
+                        << "x; average:"
+                        << setprecision(2) << setw(10) << (watch.average() * 1e6)
+                        << " usec.)" << endl;
 
                     if (!children.empty()) {
-                        double sec = length - children_time();
+                        double sec = watch.total() - children_time();
                         double perc = 100 * sec / total;
-
-                        if (perc > 1e-1) {
-                            out << "[" << setw(level + 1) << "";
-                            print_line(out, "self", sec, perc, width - level - 1);
+                        if(perc > 1e-1) {
+                            print_line(out, "self", sec, perc, width, level + 1);
+                            out << endl;
                         }
                     }
 
@@ -145,23 +256,14 @@ class profiler {
                 }
 
                 void print_line(std::ostream &out, const std::string &name,
-                        double time, double perc, uint width) const
-                {
+                        double time, double perc, uint width, uint indent) const {
                     using namespace std;
-                    out << name << ":"
-                        << setw(width - name.size()) << ""
-                        << std::fixed
-                        << setw(10) << setprecision(3) << time << " sec."
+                    out << "[" << setw(indent) << "" << name << ":"
+                        << setw(width - indent - name.size()) << ""
+                        << fixed << setw(10) << setprecision(3) << time << " sec."
                         << "] (" << setprecision(2) << setw(6) << perc << "%)";
-                    if(hit > 1)
-                        out << " (" << setw(6) << hit
-                            << "x; mean:"
-                            << setprecision(2) << setw(10) << (time * 1e6 / hit)
-                            << "; med:"
-                            << setw(10) << (deltas[(deltas.size() - 1) / 2] * 1e6)
-                            << " usec.)";
-                    out << endl;
                 }
+
             private:
                 static const uint shift_width = 2U;
         };
@@ -267,7 +369,8 @@ class profiler {
 
 } // namespace vex
 
-inline std::ostream& operator<<(std::ostream &os, vex::profiler &prof) {
+template <class Clock, vex::AvgKind Avg>
+inline std::ostream& operator<<(std::ostream &os, vex::profiler<Clock, Avg> &prof) {
     prof.print(os);
     return os;
 }
