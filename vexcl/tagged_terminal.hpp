@@ -31,6 +31,12 @@ THE SOFTWARE.
  * \brief  Tagged terminal wrapper.
  */
 
+#include <vector>
+#include <string>
+#include <sstream>
+
+#include <vexcl/operations.hpp>
+
 namespace vex {
 
 /// \cond INTERNAL
@@ -45,7 +51,42 @@ struct tagged_terminal : tagged_terminal_expression
 {
     const Term & term;
     tagged_terminal(const Term &term) : term(term) {}
+
+    // Expression assignments.
+#define ASSIGNMENT(cop, op) \
+    template <class Expr> \
+    typename std::enable_if< \
+        boost::proto::matches< \
+            typename boost::proto::result_of::as_expr<Expr>::type, \
+            vector_expr_grammar \
+        >::value, \
+        const tagged_terminal& \
+    >::type \
+    operator cop(const Expr &expr) { \
+        std::vector<cl::CommandQueue> queue; \
+        std::vector<size_t> part; \
+        size_t size; \
+        traits::expression_properties<tagged_terminal>::get(*this, queue, part, size); \
+        detail::assign_expression<op>(*this, expr, queue, part); \
+        return *this; \
+    }
+
+    ASSIGNMENT(=,   assign::SET);
+    ASSIGNMENT(+=,  assign::ADD);
+    ASSIGNMENT(-=,  assign::SUB);
+    ASSIGNMENT(*=,  assign::MUL);
+    ASSIGNMENT(/=,  assign::DIV);
+    ASSIGNMENT(%=,  assign::MOD);
+    ASSIGNMENT(&=,  assign::AND);
+    ASSIGNMENT(|=,  assign::OR);
+    ASSIGNMENT(^=,  assign::XOR);
+    ASSIGNMENT(<<=, assign::LSH);
+    ASSIGNMENT(>>=, assign::RSH);
+
+#undef ASSIGNMENT
 };
+
+namespace traits {
 
 template <>
 struct is_vector_expr_terminal< tagged_terminal_terminal >
@@ -54,7 +95,10 @@ struct is_vector_expr_terminal< tagged_terminal_terminal >
 
 template <size_t Tag, class Term>
 struct terminal_preamble< tagged_terminal<Tag, Term> > {
-    static std::string get(int component, int position, kernel_generator_state &state) {
+    static std::string get(const cl::Device &device,
+            int component, int position,
+            detail::kernel_generator_state &state)
+    {
         auto s = state.find("tagged_terminal");
 
         if (s == state.end()) {
@@ -68,16 +112,14 @@ struct terminal_preamble< tagged_terminal<Tag, Term> > {
         auto p = pos.find(Tag);
 
         typedef
-            typename boost::remove_const<
-                typename boost::remove_reference<
-                    typename boost::proto::result_of::as_child<Term>::type
-                >::type
+            typename std::decay<
+                typename boost::proto::result_of::as_child<Term>::type
             >::type TermType;
 
         if (p == pos.end()) {
             pos[Tag] = position;
 
-            return terminal_preamble<TermType>::get(component, position, state);
+            return terminal_preamble<TermType>::get(device, component, position, state);
         } else {
             return "";
         }
@@ -86,7 +128,10 @@ struct terminal_preamble< tagged_terminal<Tag, Term> > {
 
 template <size_t Tag, class Term>
 struct kernel_param_declaration< tagged_terminal<Tag, Term> > {
-    static std::string get(int component, int position, kernel_generator_state &state) {
+    static std::string get(const cl::Device &device,
+            int component, int position,
+            detail::kernel_generator_state &state)
+    {
         auto s = state.find("tagged_terminal");
 
         if (s == state.end()) {
@@ -100,16 +145,14 @@ struct kernel_param_declaration< tagged_terminal<Tag, Term> > {
         auto p = pos.find(Tag);
 
         typedef
-            typename boost::remove_const<
-                typename boost::remove_reference<
-                    typename boost::proto::result_of::as_child<Term>::type
-                >::type
+            typename std::decay<
+                typename boost::proto::result_of::as_child<Term>::type
             >::type TermType;
 
         if (p == pos.end()) {
             pos[Tag] = position;
 
-            return kernel_param_declaration<TermType>::get(component, position, state);
+            return kernel_param_declaration<TermType>::get(device, component, position, state);
         } else {
             return "";
         }
@@ -118,7 +161,10 @@ struct kernel_param_declaration< tagged_terminal<Tag, Term> > {
 
 template <size_t Tag, class Term>
 struct partial_vector_expr< tagged_terminal<Tag, Term> > {
-    static std::string get(int component, int position, kernel_generator_state &state) {
+    static std::string get(const cl::Device &device,
+            int component, int position,
+            detail::kernel_generator_state &state)
+    {
         auto s = state.find("tagged_terminal");
 
         if (s == state.end()) {
@@ -132,43 +178,40 @@ struct partial_vector_expr< tagged_terminal<Tag, Term> > {
         auto p = pos.find(Tag);
 
         typedef
-            typename boost::remove_const<
-                typename boost::remove_reference<
-                    typename boost::proto::result_of::as_child<Term>::type
-                >::type
+            typename std::decay<
+                typename boost::proto::result_of::as_child<Term>::type
             >::type TermType;
 
         if (p == pos.end()) {
             pos[Tag] = position;
-            return partial_vector_expr<TermType>::get(component, position, state);
+            return partial_vector_expr<TermType>::get(device, component, position, state);
         } else {
-            return partial_vector_expr<TermType>::get(component, p->second, state);
+            return partial_vector_expr<TermType>::get(device, component, p->second, state);
         }
     }
 };
 
 template <size_t Tag, class Term>
 struct kernel_arg_setter< tagged_terminal<Tag, Term> > {
-    static void set(cl::Kernel &kernel, uint device, size_t index_offset,
-            uint &position, const tagged_terminal<Tag, Term> &term, kernel_generator_state &state)
+    static void set(cl::Kernel &kernel, unsigned device, size_t index_offset,
+            unsigned &position, const tagged_terminal<Tag, Term> &term,
+            detail::kernel_generator_state &state)
     {
         auto s = state.find("tagged_terminal_arg");
 
         if (s == state.end()) {
             s = state.insert(std::make_pair(
                         std::string("tagged_terminal_arg"),
-                        boost::any(std::map<size_t, uint>())
+                        boost::any(std::map<size_t, unsigned>())
                         )).first;
         }
 
-        auto &pos = boost::any_cast< std::map<size_t, uint>& >(s->second);
+        auto &pos = boost::any_cast< std::map<size_t, unsigned>& >(s->second);
         auto p = pos.find(Tag);
 
         typedef
-            typename boost::remove_const<
-                typename boost::remove_reference<
-                    decltype(boost::proto::as_child(term.term))
-                >::type
+            typename std::decay<
+                decltype(boost::proto::as_child(term.term))
             >::type TermType;
 
         if (p == pos.end()) {
@@ -187,15 +230,16 @@ struct expression_properties< tagged_terminal<Tag, Term> > {
             )
     {
         typedef
-            typename boost::remove_const<
-                typename boost::remove_reference<
-                    decltype(boost::proto::as_child(term.term))
-                >::type
+            typename std::decay<
+                decltype(boost::proto::as_child(term.term))
             >::type TermType;
 
         expression_properties<TermType>::get(boost::proto::as_child(term.term), queue_list, partition, size);
     }
 };
+
+} // namespace traits
+
 /// \endcond
 
 /// Tags terminal with a unique (in a single expression) tag.
@@ -211,6 +255,9 @@ struct expression_properties< tagged_terminal<Tag, Term> > {
  * \endcode
  */
 template <size_t Tag, class Expr>
+#ifdef DOXYGEN
+tagged_terminal<Tag, Expr>
+#else
 typename std::enable_if<
     boost::proto::matches<
         typename boost::proto::result_of::as_expr<Expr>::type,
@@ -218,6 +265,7 @@ typename std::enable_if<
     >::value,
     tagged_terminal<Tag, Expr>
 >::type
+#endif
 tag(const Expr &expr) {
     return tagged_terminal<Tag, Expr>(expr);
 }

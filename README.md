@@ -1,6 +1,6 @@
 # VexCL
 
-[![Build Status](https://travis-ci.org/ddemidov/vexcl.png?branch=master)](https://travis-ci.org/ddemidov/vexcl)
+[<img src="https://travis-ci.org/ddemidov/vexcl.png?branch=master">](https://travis-ci.org/ddemidov/vexcl)
 
 VexCL is a vector expression template library for OpenCL. It has been created
 for ease of OpenCL development with C++. VexCL strives to reduce amount of
@@ -16,8 +16,8 @@ Doxygen-generated documentation: http://ddemidov.github.io/vexcl.
 
 Slides from VexCL-related talks:
 
-* [Meeting C++ 2012, Dusseldorf](https://github.com/ddemidov/vexcl/blob/master/doc/mcpp_vexcl_2012_slides.pdf?raw=true)
-* [SIAM CSE 2013, Boston](https://github.com/ddemidov/vexcl/blob/master/doc/vexcl_cse13_slides.pdf?raw=true)
+* [Meeting C++ 2012, Dusseldorf](https://speakerdeck.com/ddemidov/vexcl-at-meeting-c-plus-plus-2012)
+* [SIAM CSE 2013, Boston](https://speakerdeck.com/ddemidov/vexcl-at-cse13)
 * [FOSDEM 2013, Brussels](https://fosdem.org/2013/schedule/event/odes_cuda_opencl)
 
 The paper [Programming CUDA and OpenCL: A Case Study Using Modern C++
@@ -43,6 +43,8 @@ performance of several GPGPU libraries, including VexCL.
 * [Fast Fourier Transform](#fast-fourier-transform)
 * [Multivectors](#multivectors)
 * [Converting generic C++ algorithms to OpenCL](#converting-generic-c-algorithms-to-opencl)
+    * [Kernel generator](#kernel-generator)
+    * [Function generator](#function-generator)
 * [Custom kernels](#custom-kernels)
 * [Interoperability with other libraries](#interoperability-with-other-libraries)
 * [Supported compilers](#supported-compilers)
@@ -138,6 +140,17 @@ highly ineffective and should be used with caution. Iterators allow for element
 access as well, so that STL algorithms may in principle be used with device
 vectors. This would be very slow but may be used as a temporary building
 blocks.
+
+Another option for host-device data transfer is mapping device memory buffer to
+a host array. The mapped array then may be transparently read or written.
+Method `vector::map(unsigned d)` maps d-th partition of the vector and returns
+the mapped array:
+~~~{.cpp}
+vex::vector<double> X(ctx, N);
+auto mapped_ptr = X.map(0); // Unmapped automatically when goes out of scope
+for(size_t i = 0; i < X.part_size(0); ++i)
+    mapped_ptr[i] = host_function(i);
+~~~
 
 ## <a name="vector-expressions"></a>Vector expressions
 
@@ -311,10 +324,13 @@ using vex::range;
 vex::vector<double> X(ctx, n * n); // n-by-n matrix stored in row-major order.
 vex::vector<double> Y(ctx, n);
 
-vex::slicer<2> slice({n, n});
+// vex::extents is a helper object similar to boost::multi_array::extents
+vex::slicer<2> slice(vex::extents[n][n]);
 
 Y = slice[42](X);          // Put 42-nd row of X into Y.
-Y = slice[range()][42](X); // Put 42-nd column of X into Y;
+Y = slice[range()][42](X); // Put 42-nd column of X into Y.
+
+slice[range()][10](X) = Y; // Put Y into 10-th column of X.
 
 // Assign sub-block [10,20)x[30,40) of X to Z:
 vex::vector<double> Z = slice[range(10, 20)][range(30, 40)](X);
@@ -381,6 +397,16 @@ inter-device communication.
 Z = Y - A * X;
 ~~~
 
+This restriction may be lifted for single-device contexts. In this case VexCL
+does not need to worry about inter-device communication. Hence, it is possible
+to inline matrix-vector product into normal vector expression with help of
+`vex::make_inline()` function:
+
+~~~{.cpp}
+residual = sum(Y - vex::make_inline(A * X));
+Z = sin(vex::make_inline(A * X));
+~~~
+
 ## <a name="stencil-convolutions"></a>Stencil convolutions
 
 Stencil convolution is another common operation that may be used, for example,
@@ -402,8 +428,7 @@ following example implements non-linear operator `y(i) = sin(x(i) - x(i - 1)) +
 sin(x(i+1) - sin(x(i))`:
 ~~~{.cpp}
 VEX_STENCIL_OPERATOR(S, /*return type:*/double, /*window width:*/3, /*center:*/1,
-    "return sin(X[0] - X[-1]) + sin(X[1] - X[0]);"
-    );
+    "return sin(X[0] - X[-1]) + sin(X[1] - X[0]);", ctx);
 
 Z = S(Y);
 ~~~
@@ -502,10 +527,10 @@ cost of OpenCL programs, but at the same time it allows to generate better
 optimized kernels for the problem at hand. VexCL allows to exploit the
 possibility with help of its kernel generator mechanism.
 
-An instance of `vex::generator::symbolic<T>` dumps to output stream any
-arithmetic operations it is being subjected to. For example, this code snippet:
+An instance of `vex::symbolic<T>` dumps to output stream any arithmetic
+operations it is being subjected to. For example, this code snippet:
 ~~~{.cpp}
-vex::generator::symbolic<double> x = 6, y = 7;
+vex::symbolic<double> x = 6, y = 7;
 x = sin(x * y);
 ~~~
 results in the following output:
@@ -514,6 +539,8 @@ double var1 = 6;
 double var2 = 7;
 var1 = sin( ( var1 * var2 ) );
 ~~~
+
+### <a name="kernel-generator"></a>Kernel generator
 
 The symbolic type allows to record a sequence of arithmetic operations made by
 a generic C++ algorithm. To illustrate the idea, consider the generic
@@ -557,7 +584,7 @@ std::ostringstream body;
 vex::generator::set_recorder(body);
 
 // Create symbolic variable.
-typedef vex::generator::symbolic<double> sym_state;
+typedef vex::symbolic<double> sym_state;
 sym_state sym_x(sym_state::VectorParameter);
 
 // Record expression sequience for a single RK4 step.
@@ -580,6 +607,61 @@ This approach has some obvious restrictions. Namely, the C++ code has to be
 embarrassingly parallel and is not allowed to contain any branching or
 data-dependent loops. Nevertheless, the kernel generation facility may save
 substantial amount of both human and machine time when applicable.
+
+### <a name="functio-generator"></a>Function generator
+
+VexCL also provides a user-defined function generator which takes function
+signature and generic function object, and returns custom OpenCL function ready
+to be used in vector expressions. Lets rewrite the above example using
+autogenerated function for a Runge-Kutta stepper. First, we need to implement
+generic functor:
+
+~~~{.cpp}
+struct rk4_stepper {
+    double dt;
+
+    rk4_stepper(double dt) : dt(dt) {}
+
+    template <class state_type>
+    state_type operator()(const state_type &x) const {
+        state_type new_x = x;
+        runge_kutta_4(sys_func<state_type>, new_x, dt);
+        return new_x;
+    }
+};
+~~~
+
+Now we can generate and apply the custom function:
+~~~{.cpp}
+double dt = 0.01;
+rk4_stepper stepper(dt);
+
+// Generate custom OpenCL function:
+auto rk4 = vex::generator::make_function<double(double)>(stepper);
+
+// Create initial state.
+const size_t n = 1024 * 1024;
+vex::vector<double> x(ctx, n);
+x = 10.0 * vex::element_index() / n;
+
+// Use the function to advance initial state:
+for(int i = 0; i < 100; i++) x = rk4(x);
+~~~
+
+Note that both `runge_kutta_4()` function and `rk4_stepper` function object may
+be reused for host-side computations.
+
+It is very easy to generate an OpenCL function from a Boost.Phoenix lambda
+expression (since Boost.Phoenix lambdas are themselves generic functors):
+
+~~~{.cpp}
+using namespace boost::phoenix::arg_names;
+using vex::generator::make_function;
+
+auto squared_radius = make_function<double(double, double)>(arg1 * arg1 + arg2 * arg2);
+
+Z = squared_radius(X, Y);
+~~~
 
 ## <a name="custom-kernels"></a>Custom kernels
 

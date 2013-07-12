@@ -1,5 +1,10 @@
 #define BOOST_TEST_MODULE RandomNumbers
 #include <boost/test/unit_test.hpp>
+#include <vexcl/vector.hpp>
+#include <vexcl/element_index.hpp>
+#include <vexcl/random.hpp>
+#include <vexcl/reductor.hpp>
+#include <boost/math/constants/constants.hpp>
 #include "context_setup.hpp"
 
 BOOST_AUTO_TEST_CASE(random_numbers)
@@ -40,7 +45,7 @@ BOOST_AUTO_TEST_CASE(random_numbers)
     BOOST_CHECK(std::abs(sumd(x4)/N) < 1e-2);
 
     // E(abs(X) ~ N(0,s)) = sqrt(2/M_PI) * s
-    BOOST_CHECK(std::abs(sumd(fabs(x4))/N - std::sqrt(2 / M_PI)) < 1e-2);
+    BOOST_CHECK(std::abs(sumd(fabs(x4))/N - std::sqrt(2 / boost::math::constants::pi<double>())) < 1e-2);
 
     vex::Random<cl_double, vex::random::threefry> rand5;
     vex::vector<cl_double> x5(ctx, N);

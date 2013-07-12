@@ -1,8 +1,10 @@
 #define BOOST_TEST_MODULE KernelGenerator
 #include <boost/test/unit_test.hpp>
+#include <boost/phoenix/phoenix.hpp>
+#include <vexcl/vector.hpp>
+#include <vexcl/generator.hpp>
+#include <vexcl/tagged_terminal.hpp>
 #include "context_setup.hpp"
-
-using namespace vex;
 
 template <class state_type>
 state_type sys_func(const state_type &x) {
@@ -19,7 +21,7 @@ void runge_kutta_2(SysFunction sys, state_type &x, double dt) {
 
 BOOST_AUTO_TEST_CASE(kernel_generator)
 {
-    typedef vex::generator::symbolic<double> sym_state;
+    typedef vex::symbolic<double> sym_state;
 
     const size_t n  = 1024;
     const double dt = 0.01;
@@ -47,6 +49,102 @@ BOOST_AUTO_TEST_CASE(kernel_generator)
                 runge_kutta_2(sys_func<double>, s, dt);
 
             BOOST_CHECK_CLOSE(a, s, 1e-8);
+            });
+}
+
+BOOST_AUTO_TEST_CASE(function_generator)
+{
+    typedef vex::symbolic<double> sym_state;
+
+    const size_t n  = 1024;
+    const double dt = 0.01;
+
+    std::ostringstream body;
+    vex::generator::set_recorder(body);
+
+    sym_state sym_x(sym_state::VectorParameter);
+
+    // Record expression sequence.
+    runge_kutta_2(sys_func<sym_state>, sym_x, dt);
+
+    // Build function.
+    // Body string has to be static:
+    static std::string function_body = vex::generator::make_function(
+            body.str(), sym_x, sym_x);
+
+    VEX_FUNCTION(rk2, double(double), function_body);
+
+    std::vector<double> x = random_vector<double>(n);
+    vex::vector<double> X(ctx, x);
+
+    for(int i = 0; i < 100; i++) {
+        X = rk2(X);
+        amd_workaround();
+    }
+
+    check_sample(X, [&](size_t idx, double a) {
+            double s = x[idx];
+            for(int i = 0; i < 100; i++)
+                runge_kutta_2(sys_func<double>, s, dt);
+
+            BOOST_CHECK_CLOSE(a, s, 1e-8);
+            });
+}
+
+struct rk2_stepper {
+    double dt;
+
+    rk2_stepper(double dt) : dt(dt) {}
+
+    template <class State>
+    State operator()(const State &x) const {
+        State new_x = x;
+        runge_kutta_2(sys_func<State>, new_x, dt);
+        return new_x;
+    }
+};
+
+BOOST_AUTO_TEST_CASE(function_adapter)
+{
+    const size_t n  = 1024;
+    const double dt = 0.01;
+
+    rk2_stepper step(dt);
+
+    auto rk2 = vex::generator::make_function<double(double)>(step);
+
+    std::vector<double> x = random_vector<double>(n);
+    vex::vector<double> X(ctx, x);
+
+    for(int i = 0; i < 100; i++) {
+        X = rk2(X);
+        amd_workaround();
+    }
+
+    check_sample(X, [&](size_t idx, double a) {
+            double s = x[idx];
+            for(int i = 0; i < 100; i++) s = step(s);
+
+            BOOST_CHECK_CLOSE(a, s, 1e-8);
+            });
+}
+
+BOOST_AUTO_TEST_CASE(function_adapter_and_phoenix_lambda)
+{
+    using namespace boost::phoenix::arg_names;
+
+    const size_t n  = 1024;
+
+    auto squared_radius = vex::generator::make_function<double(double, double)>(
+            arg1 * arg1 + arg2 * arg2);
+
+    vex::vector<double> X(ctx, random_vector<double>(n));
+    vex::vector<double> Y(ctx, random_vector<double>(n));
+
+    vex::vector<double> Z = squared_radius(X, Y);
+
+    check_sample(X, Y, Z, [&](size_t, double x, double y, double z) {
+            BOOST_CHECK_CLOSE(z, x * x + y * y, 1e-8);
             });
 }
 
@@ -83,10 +181,7 @@ BOOST_AUTO_TEST_CASE(lazy_evaluation)
 
     for(int i = 0; i < 100; i++) {
         rk2(X, dt);
-        // Temporary workaround for ati bug:
-        // http://devgurus.amd.com/message/1295503#1295503
-        for(unsigned d = 0; d < ctx.size(); ++d)
-            ctx.queue(d).finish();
+        amd_workaround();
     }
 
     check_sample(X, [&](size_t idx, double a) {

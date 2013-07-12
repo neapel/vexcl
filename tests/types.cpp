@@ -15,7 +15,6 @@ BOOST_AUTO_TEST_CASE(cl_native_types)
     CHECK_IS_NATIVE( char   );
     CHECK_IS_NATIVE( short  );
     CHECK_IS_NATIVE( int    );
-    CHECK_IS_NATIVE( long   );
     CHECK_IS_NATIVE( uchar  );
     CHECK_IS_NATIVE( uint   );
     CHECK_IS_NATIVE( float  );
@@ -23,7 +22,7 @@ BOOST_AUTO_TEST_CASE(cl_native_types)
 }
 
 #define CHECK_TERMINAL(name) \
-    BOOST_CHECK( vex::is_vector_expr_terminal<name>::value )
+    BOOST_CHECK( vex::traits::is_vector_expr_terminal<name>::value )
 
 BOOST_AUTO_TEST_CASE(vector_expression_terminals)
 {
@@ -32,9 +31,5 @@ BOOST_AUTO_TEST_CASE(vector_expression_terminals)
     CHECK_TERMINAL(float);
 
     CHECK_TERMINAL(vex::vector_terminal );
-
-    CHECK_TERMINAL(vex::vector<char> );
-    CHECK_TERMINAL(vex::vector<int>  );
-    CHECK_TERMINAL(vex::vector<float>);
     CHECK_TERMINAL(vex::elem_index   );
 }

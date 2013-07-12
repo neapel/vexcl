@@ -28,20 +28,27 @@ THE SOFTWARE.
 /**
  * \file   vexcl/operations.hpp
  * \author Denis Demidov <ddemidov@ksu.ru>
- * \brief  Set of operations to be used in vector expressions.
+ * \brief  Templates used for expression tree traversal and kernel generation.
  */
 
-#ifdef WIN32
-#  pragma warning(push)
+#ifdef _MSC_VER
 #  define NOMINMAX
 #endif
 
 #include <array>
 #include <tuple>
+
 #include <boost/proto/proto.hpp>
 #include <boost/mpl/max.hpp>
 #include <boost/any.hpp>
 
+#ifndef __CL_ENABLE_EXCEPTIONS
+#  define __CL_ENABLE_EXCEPTIONS
+#endif
+#include <CL/cl.hpp>
+
+#include <vexcl/types.hpp>
+#include <vexcl/util.hpp>
 
 // Include boost.preprocessor header if variadic templates are not available.
 // Also include it if we use gcc v4.6.
@@ -82,11 +89,225 @@ namespace assign {
     ASSIGN_OP(RSH, >>=);
 
 #undef ASSIGN_OP
+
 }
 
+namespace detail {
+
+// Used as a state parameter in kernel generation functions.
+typedef std::map<std::string, boost::any> kernel_generator_state;
+
+} // namespace detail
+
+namespace traits {
+
+// Terminals allowed in vector expressions
+template <class Term, class Enable = void>
+struct is_vector_expr_terminal : std::false_type { };
+
+template <class T>
+struct is_vector_expr_terminal< T,
+    typename std::enable_if< is_cl_native< T >::value >::type
+    > : std::true_type
+{ };
+
+// Hold everything by value inside proto expressions unless explicitly
+// specified otherwise.
+template <class T, class Enable = void>
+struct hold_terminal_by_reference : std::false_type {};
+
 //---------------------------------------------------------------------------
-// Scalable expressions
+// Kernel source generation
 //---------------------------------------------------------------------------
+
+// Some terminals need preamble (e.g. struct declaration or helper function).
+// But most of them do not:
+template <class T>
+struct terminal_preamble {
+    static std::string get(const cl::Device&,
+            int/*component*/, int/*position*/,
+            detail::kernel_generator_state&)
+    {
+        return "";
+    }
+};
+
+// How to declare OpenCL kernel parameters for a terminal:
+template <class Term, class Enable = void>
+struct kernel_param_declaration {
+    static std::string get(const cl::Device&, int component, int position,
+            detail::kernel_generator_state&)
+    {
+        std::ostringstream s;
+        s << ",\n\t" << type_name<typename boost::proto::result_of::value<Term>::type>()
+          << " prm_" << component << "_" << position;
+        return s.str();
+    }
+};
+
+// Partial expression for a terminal:
+template <class Term, class Enable = void>
+struct partial_vector_expr {
+    static std::string get(const cl::Device&, int component, int position,
+            detail::kernel_generator_state&)
+    {
+        std::ostringstream s;
+        s << "prm_" << component << "_" << position;
+        return s.str();
+    }
+};
+
+// How to set OpenCL kernel arguments for a terminal:
+template <class Term, class Enable = void>
+struct kernel_arg_setter {
+    static void set(cl::Kernel &kernel, unsigned/*device*/, size_t/*index_offset*/,
+            unsigned &position, const Term &term, detail::kernel_generator_state&)
+    {
+        kernel.setArg(position++, boost::proto::value(term));
+    }
+};
+
+// How to deduce queue list, partitioning and size from a terminal:
+template <class T, class Enable = void>
+struct expression_properties {
+    static void get(const T &/*term*/,
+            std::vector<cl::CommandQueue> &/*queue_list*/,
+            std::vector<size_t> &/*partition*/,
+            size_t &/*size*/
+            )
+    { }
+};
+
+//---------------------------------------------------------------------------
+// Scalars and helper types/functions used in multivector expressions
+//---------------------------------------------------------------------------
+template <class T, class Enable = void>
+struct is_multiscalar : std::false_type {};
+
+// Arithmetic scalars
+template <class T>
+struct is_multiscalar< T,
+    typename std::enable_if< is_cl_native<T>::value >::type
+    > : std::true_type
+{};
+
+// Number of components in a multivector expression terminal.
+template <class T>
+struct number_of_components : boost::mpl::size_t<1> {};
+
+// Type of I-th component of a multivector expression terminal.
+template <size_t I, class T, class Enable = void>
+struct component { typedef T type; };
+
+#ifndef BOOST_NO_VARIADIC_TEMPLATES
+template <typename... T>
+struct And : std::true_type {};
+
+template <typename Head, typename... Tail>
+struct And<Head, Tail...>
+    : std::conditional<Head::value, And<Tail...>, std::false_type>::type
+{};
+#endif
+
+// std::tuple<...>
+#ifndef BOOST_NO_VARIADIC_TEMPLATES
+template <class... Args>
+struct is_multiscalar<std::tuple<Args...>,
+    typename std::enable_if<And< is_cl_native<Args>... >::type::value >::type
+    > : std::true_type
+{};
+
+template <class... Args>
+struct number_of_components< std::tuple<Args...> >
+    : boost::mpl::size_t<sizeof...(Args)>
+{};
+
+template <size_t I, class... Args>
+struct component< I, std::tuple<Args...> >
+    : std::tuple_element< I, std::tuple<Args...> >
+{};
+
+#else
+
+#define TUPLE_IS_MS(z, n, unused)                                      \
+  template < BOOST_PP_ENUM_PARAMS(n, class Arg) >                      \
+  struct is_multiscalar< std::tuple < BOOST_PP_ENUM_PARAMS(n, Arg) > > \
+    : std::true_type                                                   \
+  {};
+
+BOOST_PP_REPEAT_FROM_TO(1, VEXCL_MAX_ARITY, TUPLE_IS_MS, ~)
+
+#undef TUPLE_IS_MS
+
+#define TUPLE_COMP(z, n, unused)                                          \
+  template < size_t I, BOOST_PP_ENUM_PARAMS(n, class Arg) >               \
+  struct component< I, std::tuple < BOOST_PP_ENUM_PARAMS(n, Arg) > >      \
+    : std::tuple_element< I, std::tuple< BOOST_PP_ENUM_PARAMS(n, Arg) > > \
+  {};
+
+BOOST_PP_REPEAT_FROM_TO(1, VEXCL_MAX_ARITY, TUPLE_COMP, ~)
+
+#undef TUPLE_COMP
+
+#endif
+
+// std::array<T,N>
+template <class T, size_t N>
+struct is_multiscalar< std::array<T, N>,
+    typename std::enable_if< is_cl_native<T>::value >::type
+    > : std::true_type
+{};
+
+template <class T, size_t N>
+struct number_of_components< std::array<T, N> > : boost::mpl::size_t<N> {};
+
+template <size_t I, class T, size_t N>
+struct component< I, std::array<T, N> > { typedef T type; };
+
+// C-style arrays
+template <class T, size_t N>
+struct is_multiscalar< T[N],
+    typename std::enable_if< is_cl_native<T>::value >::type
+    > : std::true_type
+{};
+
+template <class T, size_t N>
+struct number_of_components< T[N] > : boost::mpl::size_t<N> {};
+
+template <size_t I, class T, size_t N>
+struct component< I, T[N] > { typedef T type; };
+
+// Terminals allowed in multivector expressions.
+template <class Term, class Enable = void>
+struct is_multivector_expr_terminal : std::false_type { };
+
+template <class T>
+struct is_multivector_expr_terminal< T,
+    typename std::enable_if< is_multiscalar<T>::value >::type
+    >
+    : std::true_type
+{ };
+
+// Extract component directly from terminal rather than from value(terminal):
+template <class T, class Enable = void>
+struct proto_terminal_is_value : std::false_type { };
+
+// Number of components in a multivector expression.
+struct multiex_dimension :
+    boost::proto::or_ <
+        boost::proto::when <
+            boost::proto::terminal< boost::proto::_ >,
+            traits::number_of_components<boost::proto::_>()
+        > ,
+        boost::proto::when <
+            boost::proto::nary_expr<boost::proto::_, boost::proto::vararg<boost::proto::_> >,
+            boost::proto::fold<boost::proto::_,
+                boost::mpl::size_t<0>(),
+                boost::mpl::max<multiex_dimension, boost::proto::_state>()>()
+        >
+    >
+{};
+
 /* Type trait to determine if an expression is scalable.
  *
  * The expression should have a type `value_type` and a field `scale` of that
@@ -94,9 +315,31 @@ namespace assign {
  */
 template <class T> struct is_scalable : std::false_type {};
 
+} // namespace traits
+
+//---------------------------------------------------------------------------
+// Extracting components from multivector expression terminals
+//---------------------------------------------------------------------------
+template <size_t I, typename T, size_t N>
+inline T& get(T t[N]) {
+    static_assert(I < N, "Component number out of bounds");
+    return t[I];
+}
+
+template <size_t I, typename T, size_t N>
+inline const T& get(const T t[N]) {
+    static_assert(I < N, "Component number out of bounds");
+    return t[I];
+}
+
+template <size_t I, typename T>
+inline T& get(T &t) {
+    return t;
+}
+
 // Scalable expressions may be multiplied by a scalar:
 template <class T>
-typename std::enable_if<vex::is_scalable<T>::value, T>::type
+typename std::enable_if<vex::traits::is_scalable<T>::value, T>::type
 operator*(const T &expr, const typename T::value_type &factor) {
     T scaled_expr(expr);
     scaled_expr.scale *= factor;
@@ -105,13 +348,13 @@ operator*(const T &expr, const typename T::value_type &factor) {
 
 // Scalable expressions may be multiplied by a scalar:
 template <class T>
-typename std::enable_if<vex::is_scalable<T>::value, T>::type
+typename std::enable_if<vex::traits::is_scalable<T>::value, T>::type
 operator*(const typename T::value_type &factor, const T &expr) {
     return expr * factor;
 }
 
 // Scalable expressions may be divided by a scalar:
-template <class T> typename std::enable_if<vex::is_scalable<T>::value, T>::type
+template <class T> typename std::enable_if<vex::traits::is_scalable<T>::value, T>::type
 operator/(const T &expr, const typename T::value_type &factor) {
     T scaled_expr(expr);
     scaled_expr.scale /= factor;
@@ -160,6 +403,9 @@ struct user_function {};
             boost::proto::bitwise_and   < grammar, grammar >, \
             boost::proto::bitwise_or    < grammar, grammar >, \
             boost::proto::bitwise_xor   < grammar, grammar > \
+        >, \
+        boost::proto::or_< \
+            boost::proto::if_else_< grammar, grammar, grammar > \
         > \
     >, \
     boost::proto::function< \
@@ -286,6 +532,8 @@ BUILTIN_FUNCTION_1(log10);
 BUILTIN_FUNCTION_1(log1p);
 BUILTIN_FUNCTION_1(logb);
 BUILTIN_FUNCTION_3(mad);
+BUILTIN_FUNCTION_2(max);
+BUILTIN_FUNCTION_2(min);
 BUILTIN_FUNCTION_2(maxmag);
 BUILTIN_FUNCTION_2(minmag);
 BUILTIN_FUNCTION_2(modf);
@@ -320,6 +568,26 @@ BUILTIN_FUNCTION_1(normalize);
 #undef BUILTIN_FUNCTION_1
 #undef BUILTIN_FUNCTION_2
 #undef BUILTIN_FUNCTION_3
+
+// Special case: abs() overloaded with floating point arguments should call
+// fabs in the OpenCL code
+struct abs_func : builtin_function {
+    static const char* name() {
+        return "fabs";
+    }
+};
+template <typename Arg>
+typename boost::proto::result_of::make_expr<
+    boost::proto::tag::function,
+    abs_func,
+    const Arg&
+>::type const
+abs(const Arg &arg) {
+    return boost::proto::make_expr<boost::proto::tag::function>(
+            abs_func(),
+            boost::ref(arg)
+            );
+}
 
 #define VEXCL_VECTOR_EXPR_EXTRACTOR(name, VG, AG, FG) \
 struct name \
@@ -409,14 +677,14 @@ struct UserFunction<Impl, RetType(ArgType...)> : user_function
     }
 
     template <class Head>
-    static void show_arg(std::ostream &os, uint pos) {
+    static void show_arg(std::ostream &os, unsigned pos) {
         if (pos > 1) os << ",";
         os << "\n\t" << type_name<Head>() << " prm" << pos;
     }
 
     template <class Head, class... Tail>
     static typename std::enable_if<sizeof...(Tail), void>::type
-    show_arg(std::ostream &os, uint pos) {
+    show_arg(std::ostream &os, unsigned pos) {
         if (pos > 1) os << ",";
         show_arg<Tail...>(
                 os << "\n\t" << type_name<Head>() << " prm" << pos, pos + 1
@@ -518,119 +786,22 @@ BOOST_PP_REPEAT_FROM_TO(1, VEXCL_MAX_ARITY, USER_FUNCTION, ~)
 /// \cond INTERNAL
 
 //---------------------------------------------------------------------------
-// Expression Transforms
+// Vector grammar
 //---------------------------------------------------------------------------
-
-// Helper functor for use with boost::fusion::for_each
-template <class Context>
-struct do_eval {
-    Context &ctx;
-
-    do_eval(Context &ctx) : ctx(ctx) {}
-
-    template <class Expr>
-    void operator()(const Expr &expr) const {
-        boost::proto::eval(expr, ctx);
-    }
-};
-
-//---------------------------------------------------------------------------
-struct process_terminal
-    : boost::proto::transform < process_terminal >
-{
-    template<typename Expr, typename Unused1, typename Unused2>
-    struct impl : boost::proto::transform_impl<Expr, Unused1, Unused2>
-    {
-        typedef typename impl::expr_param result_type;
-
-        result_type operator ()(
-              typename impl::expr_param term
-            , typename impl::state_param process
-            , typename impl::data_param) const
-        {
-            process(term);
-            return term;
-        }
-    };
-};
-
-struct extract_terminals
-    : boost::proto::or_ <
-        boost::proto::when <
-            boost::proto::terminal<boost::proto::_>,
-            process_terminal
-        > ,
-        boost::proto::function<
-            boost::proto::_,
-            boost::proto::vararg< extract_terminals >
-        > ,
-        boost::proto::when <
-            boost::proto::nary_expr<
-                boost::proto::_,
-                boost::proto::vararg< extract_terminals >
-            >
-        >
-    >
-{};
-
-struct extract_user_functions
-    : boost::proto::or_ <
-        boost::proto::terminal<boost::proto::_>,
-        boost::proto::when <
-            boost::proto::function<
-                boost::proto::when <
-                    boost::proto::terminal <
-                        boost::proto::convertible_to<vex::user_function>
-                    >,
-                    process_terminal(boost::proto::_)
-                >,
-                boost::proto::vararg< extract_user_functions >
-            >
-        > ,
-        boost::proto::when <
-            boost::proto::nary_expr<
-                boost::proto::_,
-                boost::proto::vararg< extract_user_functions >
-            >
-        >
-    >
-{};
-
-
-//---------------------------------------------------------------------------
-// Elementwise vector operations
-//---------------------------------------------------------------------------
-
-struct vector_terminal {};
-template <typename T> class vector;
-struct elem_index;
-
-// Terminals allowed in vector expressions.
-template <class Term, class Enable = void>
-struct is_vector_expr_terminal
-    : std::false_type
-{ };
-
-template <class T>
-struct is_vector_expr_terminal< T, typename std::enable_if< is_cl_native< T >::value >::type >
-    : std::true_type
-{ };
-
-
 // Grammar for vector expressions that may be processed with single kernel:
 struct vector_expr_grammar
     : boost::proto::or_<
           boost::proto::and_<
               boost::proto::terminal< boost::proto::_ >,
-              boost::proto::if_< is_vector_expr_terminal< boost::proto::_value >() >
+              boost::proto::if_< traits::is_vector_expr_terminal< boost::proto::_value >() >
           >,
           BUILTIN_OPERATIONS(vector_expr_grammar),
           USER_FUNCTIONS(vector_expr_grammar)
       >
 {};
 
-// Grammar for additive expressions (each additive term requires separate
-// kernel):
+// Grammar for additive expressions
+// (each additive term requires separate kernel):
 struct additive_vector_transform {};
 
 struct additive_vector_transform_grammar
@@ -677,17 +848,13 @@ struct vector_domain
     struct as_child : proto_base_domain::as_expr<T>
     {};
 
-    // ... except for vectors to avoid data copying.
+    // ... except for terminals that explicitly request storage by reference:
     template <typename T>
     struct as_child< T,
         typename std::enable_if<
-                boost::proto::matches<
-                    typename boost::proto::result_of::as_expr<T>::type,
-                    boost::proto::terminal< vector_terminal >
-                >::value
+                traits::hold_terminal_by_reference<T>::value
             >::type
-        >
-        : proto_base_domain::as_child< T >
+        > : proto_base_domain::as_child< T >
     {};
 };
 
@@ -699,115 +866,176 @@ struct vector_expression
         : boost::proto::extends< Expr, vector_expression<Expr>, vector_domain>(expr) {}
 };
 
+//---------------------------------------------------------------------------
+// Multivector grammar
+//---------------------------------------------------------------------------
+struct multivector_expr_grammar
+    : boost::proto::or_<
+          boost::proto::and_<
+              boost::proto::terminal< boost::proto::_ >,
+              boost::proto::if_< traits::is_multivector_expr_terminal< boost::proto::_value >() >
+          >,
+          BUILTIN_OPERATIONS(multivector_expr_grammar),
+          USER_FUNCTIONS(multivector_expr_grammar)
+      >
+{};
+
+struct additive_multivector_transform {};
+
+struct additive_multivector_transform_grammar
+    : boost::proto::or_<
+        boost::proto::terminal< additive_multivector_transform >,
+        boost::proto::plus<
+            additive_multivector_transform_grammar,
+            additive_multivector_transform_grammar
+        >,
+        boost::proto::minus<
+            additive_multivector_transform_grammar,
+            additive_multivector_transform_grammar
+        >,
+        boost::proto::negate<
+            additive_multivector_transform_grammar
+        >
+      >
+{};
+
+struct multivector_full_grammar
+    : boost::proto::or_<
+        multivector_expr_grammar,
+        boost::proto::terminal< additive_multivector_transform >,
+        boost::proto::plus< multivector_full_grammar, multivector_full_grammar >,
+        boost::proto::minus< multivector_full_grammar, multivector_full_grammar >,
+        boost::proto::negate< multivector_full_grammar >
+      >
+{};
+
+template <class Expr>
+struct multivector_expression;
+
+struct multivector_domain
+    : boost::proto::domain<
+        boost::proto::generator<multivector_expression>,
+        multivector_full_grammar
+      >
+{
+    // Store everything by value inside expressions...
+    template <typename T, class Enable = void>
+    struct as_child : proto_base_domain::as_expr<T>
+    {};
+
+    // ... except for terminals that explicitly request storage by reference:
+    template <typename T>
+    struct as_child< T,
+        typename std::enable_if<
+                traits::hold_terminal_by_reference<T>::value
+            >::type
+        > : proto_base_domain::as_child< T >
+    {};
+};
+
+template <class Expr>
+struct multivector_expression
+    : boost::proto::extends< Expr, multivector_expression<Expr>, multivector_domain>
+{
+    multivector_expression(const Expr &expr = Expr())
+        : boost::proto::extends< Expr, multivector_expression<Expr>, multivector_domain>(expr) {}
+};
 
 //---------------------------------------------------------------------------
-// Vector contexts and transform helpers
+// Expression Transforms and evaluation contexts
 //---------------------------------------------------------------------------
+namespace detail {
 
-// Representation of a terminal in a kernel name
-template <class T, class Enable = void>
-struct kernel_name {
-    static std::string get() {
-        return "term_";
+// Helper functor for use with boost::fusion::for_each
+template <class Context>
+struct do_eval {
+    Context &ctx;
+
+    do_eval(Context &ctx) : ctx(ctx) {}
+
+    template <class Expr>
+    void operator()(const Expr &expr) const {
+        boost::proto::eval(expr, ctx);
     }
 };
 
+// Generic terminal processing functor
+struct process_terminal
+    : boost::proto::transform < process_terminal >
+{
+    template<typename Expr, typename Unused1, typename Unused2>
+    struct impl : boost::proto::transform_impl<Expr, Unused1, Unused2>
+    {
+        typedef typename impl::expr_param result_type;
 
-// Builds kernel name for a vector expression.
-struct vector_name_context {
-    std::ostream &os;
-
-    vector_name_context(std::ostream &os) : os(os) {}
-
-    // Any expression except function or terminal is only interesting for its
-    // children:
-    template <typename Expr, typename Tag = typename Expr::proto_tag>
-    struct eval {
-        typedef void result_type;
-
-        void operator()(const Expr &expr, vector_name_context &ctx) const {
-            ctx.os << Tag() << "_";
-            boost::fusion::for_each(expr, do_eval<vector_name_context>(ctx));
-        }
-    };
-
-    // We only need to look at parameters of a function:
-    template <typename Expr>
-    struct eval<Expr, boost::proto::tag::function> {
-        typedef void result_type;
-
-        template <class FunCall>
-        typename std::enable_if<
-            std::is_base_of<
-                builtin_function,
-                typename boost::proto::result_of::value<
-                    typename boost::proto::result_of::child_c<FunCall,0>::type
-                >::type
-            >::value,
-        void
-        >::type
-        operator()(const FunCall &expr, vector_name_context &ctx) const {
-            ctx.os << boost::proto::value(boost::proto::child_c<0>(expr)).name() << "_";
-            boost::fusion::for_each(
-                    boost::fusion::pop_front(expr),
-                    do_eval<vector_name_context>(ctx)
-                    );
-        }
-
-        template <class FunCall>
-        typename std::enable_if<
-            std::is_base_of<
-                user_function,
-                typename boost::proto::result_of::value<
-                    typename boost::proto::result_of::child_c<FunCall,0>::type
-                >::type
-            >::value,
-        void
-        >::type
-        operator()(const FunCall &expr, vector_name_context &ctx) const {
-            ctx.os << "func" << boost::fusion::size(expr) - 1 <<  "_";
-            boost::fusion::for_each(
-                    boost::fusion::pop_front(expr),
-                    do_eval<vector_name_context>(ctx)
-                    );
-        }
-    };
-
-    template <typename Expr>
-    struct eval<Expr, boost::proto::tag::terminal> {
-        typedef void result_type;
-
-        template <typename Term>
-        void operator()(const Term&, vector_name_context &ctx) const {
-            ctx.os << kernel_name<Term>::get();
+        result_type operator ()(
+              typename impl::expr_param term
+            , typename impl::state_param process
+            , typename impl::data_param) const
+        {
+            process(term);
+            return term;
         }
     };
 };
 
-// Used as a state parameter in kernel generation functions.
-typedef std::map<std::string, boost::any> kernel_generator_state;
+// Extract (and process) terminals from a vector expression.
+struct extract_terminals
+    : boost::proto::or_ <
+        boost::proto::when <
+            boost::proto::terminal<boost::proto::_>,
+            process_terminal
+        > ,
+        boost::proto::function<
+            boost::proto::_,
+            boost::proto::vararg< extract_terminals >
+        > ,
+        boost::proto::when <
+            boost::proto::nary_expr<
+                boost::proto::_,
+                boost::proto::vararg< extract_terminals >
+            >
+        >
+    >
+{};
 
+// Extract (and process) user functions from a vector expression.
+struct extract_user_functions
+    : boost::proto::or_ <
+        boost::proto::terminal<boost::proto::_>,
+        boost::proto::when <
+            boost::proto::function<
+                boost::proto::when <
+                    boost::proto::terminal <
+                        boost::proto::convertible_to<vex::user_function>
+                    >,
+                    process_terminal(boost::proto::_)
+                >,
+                boost::proto::vararg< extract_user_functions >
+            >
+        > ,
+        boost::proto::when <
+            boost::proto::nary_expr<
+                boost::proto::_,
+                boost::proto::vararg< extract_user_functions >
+            >
+        >
+    >
+{};
+
+// Base class for stateful expression evaluation contexts .
 struct expression_context {
     mutable kernel_generator_state state;
-};
-
-// Partial expression for a terminal:
-template <class Term, class Enable = void>
-struct partial_vector_expr {
-    static std::string get(int component, int position, kernel_generator_state&) {
-        std::ostringstream s;
-        s << "prm_" << component << "_" << position;
-        return s.str();
-    }
 };
 
 // Builds textual representation for a vector expression.
 struct vector_expr_context : public expression_context {
     std::ostream &os;
+    const cl::Device &device;
     int cmp_idx, prm_idx, fun_idx;
 
-    vector_expr_context(std::ostream &os, int cmp_idx = 1)
-        : os(os), cmp_idx(cmp_idx), prm_idx(0), fun_idx(0) {}
+    vector_expr_context(std::ostream &os, const cl::Device &device, int cmp_idx = 1)
+        : os(os), device(device), cmp_idx(cmp_idx), prm_idx(0), fun_idx(0) {}
 
     template <typename Expr, typename Tag = typename Expr::proto_tag>
     struct eval {};
@@ -882,6 +1110,20 @@ struct vector_expr_context : public expression_context {
 #undef UNARY_POST_OPERATION
 
     template <typename Expr>
+    struct eval<Expr, boost::proto::tag::if_else_> {
+        typedef void result_type;
+        void operator()(const Expr &expr, vector_expr_context &ctx) const {
+            ctx.os << "( ";
+            boost::proto::eval(boost::proto::child_c<0>(expr), ctx);
+            ctx.os << " ? ";
+            boost::proto::eval(boost::proto::child_c<1>(expr), ctx);
+            ctx.os << " : ";
+            boost::proto::eval(boost::proto::child_c<2>(expr), ctx);
+            ctx.os << " )";
+        }
+    };
+
+    template <typename Expr>
     struct eval<Expr, boost::proto::tag::function> {
         typedef void result_type;
 
@@ -941,7 +1183,8 @@ struct vector_expr_context : public expression_context {
 
         template <typename Term>
         void operator()(const Term&, vector_expr_context &ctx) const {
-            ctx.os << partial_vector_expr<Term>::get(ctx.cmp_idx, ++ctx.prm_idx, ctx.state);
+            ctx.os << traits::partial_vector_expr<Term>::get(
+                    ctx.device, ctx.cmp_idx, ++ctx.prm_idx, ctx.state);
         }
     };
 };
@@ -964,32 +1207,24 @@ struct declare_user_function {
         }
 };
 
-// Some terminals need preamble (e.g. struct declaration or helper function).
-// But most of them do not:
-template <class T>
-struct terminal_preamble {
-    static std::string get(int/*component*/, int/*position*/, kernel_generator_state&)
-    {
-        return "";
-    }
-};
-
 struct output_terminal_preamble : expression_context {
     std::ostream &os;
+    const cl::Device &device;
     int cmp_idx;
     mutable int prm_idx;
 
-    output_terminal_preamble(std::ostream &os, int cmp_idx = 1)
-        : os(os), cmp_idx(cmp_idx), prm_idx(0) {}
+    output_terminal_preamble(std::ostream &os, const cl::Device &device, int cmp_idx = 1)
+        : os(os), device(device), cmp_idx(cmp_idx), prm_idx(0) {}
 
         template <class Term>
         void operator()(const Term&) const {
-            os << terminal_preamble<Term>::get(cmp_idx, ++prm_idx, state) << std::endl;
+            os << traits::terminal_preamble<Term>::get(
+                    device, cmp_idx, ++prm_idx, state) << std::endl;
         }
 };
 
 template <class Expr>
-void construct_preamble(const Expr &expr, std::ostream &kernel_source, int component = 1) {
+void construct_preamble(const Expr &expr, std::ostream &kernel_source, const cl::Device &device, int component = 1) {
 
     extract_user_functions()(
             boost::proto::as_child(expr),
@@ -998,66 +1233,40 @@ void construct_preamble(const Expr &expr, std::ostream &kernel_source, int compo
 
     extract_terminals()(
             boost::proto::as_child(expr),
-            output_terminal_preamble(kernel_source, component)
+            output_terminal_preamble(kernel_source, device, component)
             );
 
 }
 
-template <class Term, class Enable = void>
-struct kernel_param_declaration {
-    static std::string get(int component, int position, kernel_generator_state&) {
-        std::ostringstream s;
-        s << ",\n\t" << type_name<typename boost::proto::result_of::value<Term>::type>()
-          << " prm_" << component << "_" << position;
-        return s.str();
-    }
-};
-
 struct declare_expression_parameter : expression_context {
     std::ostream &os;
+    const cl::Device &device;
     int cmp_idx;
     mutable int prm_idx;
 
-    declare_expression_parameter(std::ostream &os, int cmp_idx = 1)
-        : os(os), cmp_idx(cmp_idx), prm_idx(0) {}
+    declare_expression_parameter(std::ostream &os, const cl::Device &device, int cmp_idx = 1)
+        : os(os), device(device), cmp_idx(cmp_idx), prm_idx(0) {}
 
     template <typename T>
     void operator()(const T&) const {
-        os << kernel_param_declaration<T>::get(cmp_idx, ++prm_idx, state);
-    }
-};
-
-template <class Term, class Enable = void>
-struct kernel_arg_setter {
-    static void set(cl::Kernel &kernel, uint/*device*/, size_t/*index_offset*/,
-            uint &position, const Term &term, kernel_generator_state&)
-    {
-        kernel.setArg(position++, boost::proto::value(term));
+        os << traits::kernel_param_declaration<T>::get(
+                device, cmp_idx, ++prm_idx, state);
     }
 };
 
 struct set_expression_argument : expression_context {
     cl::Kernel &krn;
-    uint dev, &pos;
+    unsigned dev, &pos;
     size_t part_start;
 
-    set_expression_argument(cl::Kernel &krn, uint dev, uint &pos, size_t part_start)
+    set_expression_argument(cl::Kernel &krn, unsigned dev, unsigned &pos, size_t part_start)
         : krn(krn), dev(dev), pos(pos), part_start(part_start) {}
 
     template <typename T>
     void operator()(const T &term) const {
-        kernel_arg_setter<T>::set(krn, dev, part_start, pos, term, state);
+        traits::kernel_arg_setter<T>::set(
+                krn, dev, part_start, pos, term, state);
     }
-};
-
-template <class T, class Enable = void>
-struct expression_properties {
-    static void get(const T &/*term*/,
-            std::vector<cl::CommandQueue> &/*queue_list*/,
-            std::vector<size_t> &/*partition*/,
-            size_t &/*size*/
-            )
-    { }
 };
 
 struct get_expression_properties {
@@ -1067,18 +1276,18 @@ struct get_expression_properties {
 
     get_expression_properties() : size(0) {}
 
-    size_t part_start(uint d) const {
+    size_t part_start(unsigned d) const {
         return part.empty() ? 0 : part[d];
     }
 
-    size_t part_size(uint d) const {
+    size_t part_size(unsigned d) const {
         return part.empty() ? 0 : part[d + 1] - part[d];
     }
 
     template <typename T>
     void operator()(const T &term) const {
         if (queue.empty())
-            expression_properties<T>::get(term, queue, part, size);
+            traits::expression_properties<T>::get(term, queue, part, size);
     }
 };
 
@@ -1199,274 +1408,6 @@ typename std::enable_if<
 }
 
 //---------------------------------------------------------------------------
-// Elementwise multi-vector operations
-//---------------------------------------------------------------------------
-
-//--- Scalars and helper types/functions used in multivector expressions ----
-template <class T, class Enable = void>
-struct is_multiscalar : std::false_type
-{};
-
-// Arithmetic scalars
-
-template <class T>
-struct is_multiscalar< T,
-    typename std::enable_if< is_cl_native<T>::value >::type >
-    : std::true_type
-{};
-
-template <class T>
-struct number_of_components : boost::mpl::size_t<1>
-{};
-
-template <size_t I, class T, class Enable = void>
-struct component {
-    typedef T type;
-};
-
-template <size_t I, typename T>
-inline T& get(T &t) {
-    return t;
-}
-
-#ifndef BOOST_NO_VARIADIC_TEMPLATES
-
-// std::tuple<...>
-template <typename... T>
-struct And : std::true_type {};
-
-template <typename Head, typename... Tail>
-struct And<Head, Tail...>
-    : std::conditional<Head::value, And<Tail...>, std::false_type>::type
-{};
-
-template <class... Args>
-struct is_multiscalar<std::tuple<Args...>,
-    typename std::enable_if<And< is_cl_native<Args>... >::type::value >::type >
-    : std::true_type
-{};
-
-template <class... Args>
-struct number_of_components< std::tuple<Args...> >
-    : boost::mpl::size_t<sizeof...(Args)>
-{};
-
-template <size_t I, class... Args>
-struct component< I, std::tuple<Args...> >
-    : std::tuple_element< I, std::tuple<Args...> >
-{};
-
-#endif
-
-// std::array<T,N>
-
-template <class T, size_t N>
-struct is_multiscalar< std::array<T, N>,
-    typename std::enable_if< is_cl_native<T>::value >::type >
-    : std::true_type
-{};
-
-template <class T, size_t N>
-struct number_of_components< std::array<T, N> >
-    : boost::mpl::size_t<N>
-{};
-
-template <size_t I, class T, size_t N>
-struct component< I, std::array<T, N> > {
-    typedef T type;
-};
-
-// C-style arrays
-template <class T, size_t N>
-struct is_multiscalar< T[N],
-    typename std::enable_if< is_cl_native<T>::value >::type >
-    : std::true_type
-{};
-
-template <class T, size_t N>
-struct number_of_components< T[N] >
-    : boost::mpl::size_t<N>
-{};
-
-template <size_t I, class T, size_t N>
-struct component< I, T[N] > {
-    typedef T type;
-};
-
-template <size_t I, typename T, size_t N>
-inline const T& get(const T t[N]) {
-    static_assert(I < N, "Component number out of bounds");
-    return t[I];
-}
-
-template <size_t I, typename T, size_t N>
-inline T& get(T t[N]) {
-    static_assert(I < N, "Component number out of bounds");
-    return t[I];
-}
-
-struct multivector_terminal {};
-
-template <typename T, size_t N, bool own = true>
-class multivector;
-
-template <typename T, size_t N, bool own>
-struct number_of_components< multivector<T, N, own> >
-    : boost::mpl::size_t<N>
-{};
-
-template <size_t I, typename T, size_t N, bool own>
-struct component< I, multivector<T, N, own> > {
-    typedef vector<T> type;
-};
-
-template <size_t I, typename T, size_t N, bool own>
-const vector<T>& get(const multivector<T, N, own> &mv) {
-    static_assert(I < N, "Component number out of bounds");
-
-    return mv(I);
-}
-
-template <size_t I, typename T, size_t N, bool own>
-vector<T>& get(multivector<T, N, own> &mv) {
-    static_assert(I < N, "Component number out of bounds");
-
-    return mv(I);
-}
-
-struct mutltiex_dimension
-        : boost::proto::or_ <
-            boost::proto::when <
-                boost::proto::terminal< boost::proto::_ >,
-                number_of_components<boost::proto::_>()
-            > ,
-            boost::proto::when <
-                boost::proto::nary_expr<boost::proto::_, boost::proto::vararg<boost::proto::_> >,
-                boost::proto::fold<boost::proto::_,
-                    boost::mpl::size_t<0>(),
-                    boost::mpl::max<mutltiex_dimension, boost::proto::_state>()>()
-            >
-        >
-{};
-
-template <size_t I, class T>
-struct component< I, T,
-    typename std::enable_if<
-        !is_multiscalar<T>::value &&
-        is_multiscalar<
-            typename boost::proto::result_of::value<
-                typename boost::proto::result_of::as_expr<T>::type
-            >::type
-        >::value >::type
-    >
-{
-    typedef typename boost::proto::result_of::value<
-                typename boost::proto::result_of::as_expr<T>::type
-            >::type value_type;
-
-    typedef typename boost::proto::result_of::as_child<
-        typename component<I, value_type>::type
-        >::type type;
-};
-
-template <size_t I, typename T>
-inline const
-typename std::enable_if<
-    !is_multiscalar<T>::value &&
-    is_multiscalar<
-        typename boost::proto::result_of::value<
-            typename boost::proto::result_of::as_expr<T>::type
-        >::type
-    >::value,
-    typename component<I, T>::type
->::type
-get(const T &t) {
-    return boost::proto::as_child(get<I>(boost::proto::value(t)));
-}
-
-//--- Multivector grammar ---------------------------------------------------
-
-struct multivector_expr_grammar
-    : boost::proto::or_<
-          boost::proto::or_<
-              boost::proto::or_< boost::proto::terminal< elem_index > >, \
-              boost::proto::terminal< multivector_terminal >,
-              boost::proto::and_<
-                  boost::proto::terminal< boost::proto::_ >,
-                  boost::proto::if_< is_multiscalar< boost::proto::_value >() >
-              >
-          >,
-          BUILTIN_OPERATIONS(multivector_expr_grammar),
-          USER_FUNCTIONS(multivector_expr_grammar)
-      >
-{};
-
-struct additive_multivector_transform {};
-
-struct additive_multivector_transform_grammar
-    : boost::proto::or_<
-        boost::proto::terminal< additive_multivector_transform >,
-        boost::proto::plus<
-            additive_multivector_transform_grammar,
-            additive_multivector_transform_grammar
-        >,
-        boost::proto::minus<
-            additive_multivector_transform_grammar,
-            additive_multivector_transform_grammar
-        >,
-        boost::proto::negate<
-            additive_multivector_transform_grammar
-        >
-      >
-{};
-
-struct multivector_full_grammar
-    : boost::proto::or_<
-        multivector_expr_grammar,
-        boost::proto::terminal< additive_multivector_transform >,
-        boost::proto::plus< multivector_full_grammar, multivector_full_grammar >,
-        boost::proto::minus< multivector_full_grammar, multivector_full_grammar >,
-        boost::proto::negate< multivector_full_grammar >
-      >
-{};
-
-template <class Expr>
-struct multivector_expression;
-
-struct multivector_domain
-    : boost::proto::domain<
-        boost::proto::generator<multivector_expression>,
-        multivector_full_grammar
-      >
-{
-    // Store everything by value inside expressions...
-    template <typename T, class Enable = void>
-    struct as_child : proto_base_domain::as_expr<T>
-    {};
-
-    // ... except for vectors to avoid data copying.
-    template <typename T>
-    struct as_child< T,
-        typename std::enable_if<
-                boost::proto::matches<
-                    typename boost::proto::result_of::as_expr<T>::type,
-                    boost::proto::terminal< multivector_terminal >
-                >::value
-            >::type
-        >
-        : proto_base_domain::as_child< T >
-    {};
-};
-
-template <class Expr>
-struct multivector_expression
-    : boost::proto::extends< Expr, multivector_expression<Expr>, multivector_domain>
-{
-    multivector_expression(const Expr &expr = Expr())
-        : boost::proto::extends< Expr, multivector_expression<Expr>, multivector_domain>(expr) {}
-};
-
-//---------------------------------------------------------------------------
 // Multiexpression component extractor
 //---------------------------------------------------------------------------
 template <size_t C>
@@ -1476,11 +1417,9 @@ struct extract_component : boost::proto::callable {
 
     template <class This, class T>
     struct result< This(T) > {
-        typedef const typename component< C,
-                typename boost::remove_const<
-                    typename boost::remove_reference<T>::type
-                >::type
-            >::type& type;
+        typedef const typename traits::component< C,
+                typename std::decay<T>::type
+            >::type type;
     };
 
     template <class T>
@@ -1495,7 +1434,10 @@ template <size_t C>
 struct extract_subexpression
     : boost::proto::or_ <
         boost::proto::when <
-            boost::proto::terminal< multivector_terminal >,
+            boost::proto::and_<
+                boost::proto::terminal< boost::proto::_ >,
+                boost::proto::if_< traits::proto_terminal_is_value< boost::proto::_value >() >
+            >,
             extract_component<C>( boost::proto::_ )
         > ,
         boost::proto::when <
@@ -1562,10 +1504,114 @@ VEXCL_ADDITIVE_EXPR_EXTRACTOR(extract_additive_multivector_transforms,
         multivector_full_grammar
         );
 
+struct kernel_cache_entry {
+    cl::Kernel kernel;
+    size_t     wgsize;
+
+    kernel_cache_entry(const cl::Kernel &kernel, size_t wgsize)
+        : kernel(kernel), wgsize(wgsize)
+    {}
+};
+
+typedef std::map< cl_context, kernel_cache_entry > kernel_cache;
+
+
+//---------------------------------------------------------------------------
+// Assign expression to lhs
+//---------------------------------------------------------------------------
+template <class OP, class LHS, class Expr>
+void assign_expression(LHS &lhs, const Expr &expr,
+        const std::vector<cl::CommandQueue> &queue,
+        const std::vector<size_t> &part
+        )
+{
+    static kernel_cache cache;
+
+    for(unsigned d = 0; d < queue.size(); d++) {
+        cl::Context context = qctx(queue[d]);
+        cl::Device  device  = qdev(queue[d]);
+
+        auto kernel = cache.find(context());
+
+        if (kernel == cache.end()) {
+            std::ostringstream source;
+
+            source << standard_kernel_header(device);
+
+            declare_user_function declfun(source);
+
+            extract_user_functions()(boost::proto::as_child(lhs),  declfun);
+            extract_user_functions()(boost::proto::as_child(expr), declfun);
+
+            output_terminal_preamble termpream(source, device);
+
+            extract_terminals()(boost::proto::as_child(lhs),  termpream);
+            extract_terminals()(boost::proto::as_child(expr), termpream);
+
+            source << "kernel void vexcl_vector_kernel(\n"
+                   "\t" << type_name<size_t>() << " n";
+
+            declare_expression_parameter declare(source, device);
+
+            extract_terminals()(boost::proto::as_child(lhs),  declare);
+            extract_terminals()(boost::proto::as_child(expr), declare);
+
+            source << "\n)\n{\n";
+
+            if ( is_cpu(device) ) {
+                source <<
+                    "\tsize_t chunk_size  = (n + get_global_size(0) - 1) / get_global_size(0);\n"
+                    "\tsize_t chunk_start = get_global_id(0) * chunk_size;\n"
+                    "\tsize_t chunk_end   = min(n, chunk_start + chunk_size);\n"
+                    "\tfor(size_t idx = chunk_start; idx < chunk_end; ++idx) {\n";
+            } else {
+                source <<
+                    "\tfor(size_t idx = get_global_id(0); idx < n; idx += get_global_size(0)) {\n";
+            }
+
+            vector_expr_context expr_ctx(source, device);
+
+            source << "\t\t";
+
+            boost::proto::eval(boost::proto::as_child(lhs), expr_ctx);
+            source << " " << OP::string() << " ";
+            boost::proto::eval(boost::proto::as_child(expr), expr_ctx);
+
+            source << ";\n\t}\n}\n";
+
+            auto program = build_sources(context, source.str());
+
+            cl::Kernel krn(program, "vexcl_vector_kernel");
+            size_t wgs = kernel_workgroup_size(krn, device);
+
+            kernel = cache.insert(std::make_pair(
+                        context(), kernel_cache_entry(krn, wgs)
+                        )).first;
+        }
+
+        if (size_t psize = part[d + 1] - part[d]) {
+            size_t w_size = kernel->second.wgsize;
+            size_t g_size = num_workgroups(device) * w_size;
+
+            unsigned pos = 0;
+            kernel->second.kernel.setArg(pos++, psize);
+
+            set_expression_argument setarg(kernel->second.kernel, d, pos, part[d]);
+
+            extract_terminals()( boost::proto::as_child(lhs),  setarg);
+            extract_terminals()( boost::proto::as_child(expr), setarg);
+
+            queue[d].enqueueNDRangeKernel(
+                    kernel->second.kernel, cl::NullRange, g_size, w_size
+                    );
+        }
+    }
+}
+
+} // namespace detail
 /// \endcond
 
 } // namespace vex;
 
 
-// vim: et
 #endif

@@ -38,7 +38,6 @@ THE SOFTWARE.
 #include <vexcl/vector.hpp>
 #include <vexcl/fft/unrolled_dft.hpp>
 #include <vexcl/fft/kernels.hpp>
-#include <boost/lexical_cast.hpp>
 
 namespace vex {
 
@@ -179,9 +178,9 @@ template <class T0, class T1, class Planner = planner>
 struct plan {
     typedef typename cl_scalar_of<T0>::type T0s;
     typedef typename cl_scalar_of<T1>::type T1s;
-    static_assert(boost::is_same<T0s, T1s>::value, "Input and output must have same precision.");
+    static_assert(std::is_same<T0s, T1s>::value, "Input and output must have same precision.");
     typedef T0s T;
-    static_assert(boost::is_same<T, cl_float>::value || boost::is_same<T, cl_double>::value,
+    static_assert(std::is_same<T, cl_float>::value || std::is_same<T, cl_double>::value,
         "Only float and double data supported.");
 
     typedef typename cl_vector_of<T, 2>::type T2;
@@ -205,19 +204,26 @@ struct plan {
     //  1D case: {n}.
     //  2D case: {h, w} in row-major format: x + y * w. (like FFTw)
     //  etc.
-    plan(const std::vector<cl::CommandQueue> &_queues, const std::vector<size_t> sizes, const std::vector<direction> dirs, const Planner &planner = Planner())
+    plan(const std::vector<cl::CommandQueue> &_queues, const std::vector<size_t> sizes,
+        const std::vector<direction> dirs, const Planner &planner = Planner())
         : queues(_queues), planner(planner), sizes(sizes), profile(NULL)
     {
         assert(sizes.size() >= 1);
         assert(sizes.size() == dirs.size());
-        assert(queues.size() == 1);
+
+        precondition(
+                queues.size() == 1,
+                "FFT is only supported for single-device contexts."
+                );
+
         auto queue = queues[0];
         auto context = qctx(queue);
         auto device = qdev(queue);
 
-        size_t total_n = std::accumulate(sizes.begin(), sizes.end(), 1, std::multiplies<size_t>());
+        size_t total_n = std::accumulate(sizes.begin(), sizes.end(),
+	    static_cast<size_t>(1), std::multiplies<size_t>());
         size_t current = bufs.size(); bufs.push_back(cl::Buffer(context, CL_MEM_READ_WRITE, sizeof(T2) * total_n));
-        size_t other = bufs.size(); bufs.push_back(cl::Buffer(context, CL_MEM_READ_WRITE, sizeof(T2) * total_n));
+        size_t other   = bufs.size(); bufs.push_back(cl::Buffer(context, CL_MEM_READ_WRITE, sizeof(T2) * total_n));
 
         size_t inv_n = 1;
         for(size_t i = 0 ; i < sizes.size() ; i++)
@@ -266,10 +272,10 @@ struct plan {
         auto context = qctx(queues[0]);
 
         size_t b_twiddle = bufs.size(); bufs.push_back(cl::Buffer(context, CL_MEM_READ_WRITE, sizeof(T2) * n));
-        size_t b_other = bufs.size(); bufs.push_back(cl::Buffer(context, CL_MEM_READ_WRITE, sizeof(T2) * conv_n));
+        size_t b_other   = bufs.size(); bufs.push_back(cl::Buffer(context, CL_MEM_READ_WRITE, sizeof(T2) * conv_n));
         size_t b_current = bufs.size(); bufs.push_back(cl::Buffer(context, CL_MEM_READ_WRITE, sizeof(T2) * conv_n));
         size_t a_current = bufs.size(); bufs.push_back(cl::Buffer(context, CL_MEM_READ_WRITE, sizeof(T2) * conv_n * batch * threads));
-        size_t a_other = bufs.size(); bufs.push_back(cl::Buffer(context, CL_MEM_READ_WRITE, sizeof(T2) * conv_n * batch * threads));
+        size_t a_other   = bufs.size(); bufs.push_back(cl::Buffer(context, CL_MEM_READ_WRITE, sizeof(T2) * conv_n * batch * threads));
 
         // calculate twiddle factors
         kernels.push_back(bluestein_twiddle<T>(queues[0], n, inverse,

@@ -12,13 +12,6 @@ if (VEXCL_SHOW_KERNELS)
 endif (VEXCL_SHOW_KERNELS)
 
 #----------------------------------------------------------------------------
-# Enable math constants in Win32
-#----------------------------------------------------------------------------
-if (WIN32)
-    add_definitions(-D_USE_MATH_DEFINES)
-endif (WIN32)
-
-#----------------------------------------------------------------------------
 # Find Boost
 #----------------------------------------------------------------------------
 if (WIN32)
@@ -27,15 +20,19 @@ else (WIN32)
     add_definitions(-DBOOST_TEST_DYN_LINK)
 endif (WIN32)
 
-find_package(Boost COMPONENTS
-    chrono
+set(BOOST_COMPONENTS
     date_time
     filesystem
     system
-    thread
     unit_test_framework
     program_options
     )
+
+if (MSVC10)
+    set(BOOST_COMPONENTS ${BOOST_COMPONENTS} chrono)
+endif (MSVC10)
+
+find_package(Boost COMPONENTS ${BOOST_COMPONENTS})
 
 include_directories( ${Boost_INCLUDE_DIRS} )
 

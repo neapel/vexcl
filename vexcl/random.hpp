@@ -31,6 +31,7 @@ THE SOFTWARE.
  * \brief  Random generators.
  */
 
+#include <vexcl/operations.hpp>
 #include <vexcl/random/philox.hpp>
 #include <vexcl/random/threefry.hpp>
 
@@ -79,14 +80,14 @@ struct Random : UserFunction<Random<T, Generator>, T(cl_ulong, cl_ulong)> {
                 Generator::template macro<cl_ulong4>(o, "rand");
                 break;
             default:
-                throw std::runtime_error("Unsupported random output type.");
+                precondition(false, "Unsupported random output type.");
         }
         o << "ctr_t ctr; ctr.s0 = prm1; ctr.s1 = prm2;\n"
             "key_t key = 0x12345678;\n"
             "rand(ctr, key);\n"
             "#undef rand\n";
 
-        if(boost::is_same<Ts, cl_float>::value) {
+        if(std::is_same<Ts, cl_float>::value) {
             o << "return convert_" << type_name<T>() << "(as_"
               << type_name<typename cl_vector_of<cl_uint, N>::type>()
               << "(ctr";
@@ -94,7 +95,7 @@ struct Random : UserFunction<Random<T, Generator>, T(cl_ulong, cl_ulong)> {
             o << ")) / "
               << std::numeric_limits<cl_uint>::max()
               << ".0f;";
-        } else if(boost::is_same<Ts, cl_double>::value) {
+        } else if(std::is_same<Ts, cl_double>::value) {
             o << "return convert_" << type_name<T>() << "(as_"
               << type_name<typename cl_vector_of<cl_ulong, N>::type>()
               << "(ctr)) / "
@@ -126,14 +127,16 @@ struct Random : UserFunction<Random<T, Generator>, T(cl_ulong, cl_ulong)> {
 template <class T, class Generator = random::philox>
 struct RandomNormal : UserFunction<RandomNormal<T,Generator>, T(cl_ulong, cl_ulong)> {
     typedef typename cl_scalar_of<T>::type Ts;
-    static_assert(boost::is_same<Ts, cl_float>::value
-        || boost::is_same<Ts, cl_double>::value,
-        "Must use float or double vector or scalar.");
+    static_assert(
+            std::is_same<Ts, cl_float>::value ||
+            std::is_same<Ts, cl_double>::value,
+            "Must use float or double vector or scalar."
+            );
     typedef typename cl_vector_of<Ts,2>::type T2;
 
     static std::string body() {
         const size_t N = cl_vector_length<T>::value;
-        const bool is_float = boost::is_same<Ts, cl_float>::value;
+        const bool is_float = std::is_same<Ts, cl_float>::value;
 
         std::ostringstream o;
         if(is_float)

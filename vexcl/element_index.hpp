@@ -31,9 +31,7 @@ THE SOFTWARE.
  * \brief  Element index for use in vector expressions.
  */
 
-#include <boost/proto/proto.hpp>
 #include <vexcl/operations.hpp>
-#include <vexcl/util.hpp>
 
 namespace vex {
 
@@ -51,29 +49,13 @@ element_index(size_t offset = 0) {
     return boost::proto::as_expr<vector_domain>(elem_index(offset));
 }
 
-/// \cond INTERNAL
-template <>
-inline std::string type_name<elem_index>() {
-    return type_name<size_t>();
-}
+namespace traits {
 
 template <>
-struct is_vector_expr_terminal< elem_index >
-    : std::true_type
-{ };
+struct is_vector_expr_terminal< elem_index > : std::true_type {};
 
-template <class T>
-struct kernel_name< T, typename std::enable_if<
-        boost::proto::matches<
-            T,
-            boost::proto::terminal<elem_index>
-        >::value
-    >::type>
-{
-    static std::string get() {
-        return "index_";
-    }
-};
+template <>
+struct is_multivector_expr_terminal< elem_index > : std::true_type {};
 
 template <class T>
 struct partial_vector_expr< T, typename std::enable_if<
@@ -83,7 +65,9 @@ struct partial_vector_expr< T, typename std::enable_if<
         >::value
     >::type >
 {
-    static std::string get(int component, int position, kernel_generator_state&) {
+    static std::string get(const cl::Device&, int component, int position,
+            detail::kernel_generator_state&)
+    {
         std::ostringstream s;
         s << "(prm_" << component << "_" << position << " + idx)";
         return s.str();
@@ -98,9 +82,12 @@ struct kernel_param_declaration< T, typename std::enable_if<
         >::value
     >::type>
 {
-    static std::string get(int component, int position, kernel_generator_state&) {
+    static std::string get(const cl::Device&, int component, int position,
+            detail::kernel_generator_state&)
+    {
         std::ostringstream s;
-        s << ",\n\tulong prm_" << component << "_" << position;
+        s << ",\n\t" << type_name<size_t>() << " prm_"
+          << component << "_" << position;
         return s.str();
     }
 };
@@ -113,14 +100,14 @@ struct kernel_arg_setter< T, typename std::enable_if<
         >::value
     >::type>
 {
-    static void set(cl::Kernel &kernel, uint/*device*/, size_t index_offset,
-            uint &position, const T &term, kernel_generator_state&)
+    static void set(cl::Kernel &kernel, unsigned/*device*/, size_t index_offset,
+            unsigned &position, const T &term, detail::kernel_generator_state&)
     {
         kernel.setArg(position++, boost::proto::value(term).offset + index_offset);
     }
 };
 
-/// \endcond
+} // namespace traits
 
 } // namespace vex;
 

@@ -1,5 +1,5 @@
-#ifndef VEXCL_REDUCE_HPP
-#define VEXCL_REDUCE_HPP
+#ifndef VEXCL_REDUCTOR_HPP
+#define VEXCL_REDUCTOR_HPP
 
 /*
 The MIT License
@@ -26,22 +26,23 @@ THE SOFTWARE.
 */
 
 /**
- * \file   vexcl/reduce.hpp
+ * \file   vexcl/reductor.hpp
  * \author Denis Demidov <ddemidov@ksu.ru>
- * \brief  OpenCL vector reduction.
+ * \brief  Vector expression reduction.
  */
 
-#ifdef WIN32
-#  pragma warning(push)
-#  pragma warning(disable : 4146 4290 4715)
+#ifdef _MSC_VER
 #  define NOMINMAX
 #endif
 
 #include <vector>
+#include <array>
+#include <string>
 #include <sstream>
 #include <numeric>
 #include <limits>
-#include <vexcl/vector.hpp>
+
+#include <vexcl/operations.hpp>
 
 namespace vex {
 
@@ -119,26 +120,29 @@ class Reductor {
         /// Constructor.
         Reductor(const std::vector<cl::CommandQueue> &queue = current_context().queue());
 
-        /// Compute reduction of the input expression.
-        /**
-         * The input expression may be as simple as a single vector, although
-         * expressions of arbitrary complexity may be reduced.
-         */
+        /// Compute reduction of a vector expression.
         template <class Expr>
+#ifdef DOXYGEN
+        real
+#else
         typename std::enable_if<
             boost::proto::matches<Expr, vector_expr_grammar>::value,
             real
         >::type
+#endif
         operator()(const Expr &expr) const;
 
-#ifdef VEXCL_MULTIVECTOR_HPP
+        /// Compute reduction of a multivector expression.
         template <class Expr>
+#ifdef DOXYGEN
+        std::array<real, N>
+#else
         typename std::enable_if<
             boost::proto::matches<Expr, multivector_expr_grammar>::value,
-            std::array<real, boost::result_of<mutltiex_dimension(Expr)>::type::value>
+            std::array<real, std::result_of<traits::multiex_dimension(Expr)>::type::value>
         >::type
-        operator()(const Expr &expr) const;
 #endif
+        operator()(const Expr &expr) const;
     private:
         const std::vector<cl::CommandQueue> &queue;
         std::vector<size_t> idx;
@@ -156,12 +160,13 @@ class Reductor {
         typename std::enable_if<I < N, void>::type
         assign_subexpressions(std::array<real, N> &result, const Expr &expr) const
         {
-            result[I] = (*this)(extract_subexpression<I>()(expr));
+            result[I] = (*this)(detail::extract_subexpression<I>()(expr));
 
             assign_subexpressions<I + 1, N, Expr>(result, expr);
         }
 };
 
+#ifndef DOXYGEN
 template <typename real, class RDC>
 Reductor<real,RDC>::Reductor(const std::vector<cl::CommandQueue> &queue)
     : queue(queue), event(queue.size())
@@ -188,6 +193,8 @@ typename std::enable_if<
     real
 >::type
 Reductor<real,RDC>::operator()(const Expr &expr) const {
+    using namespace detail;
+
     static kernel_cache cache;
 
     get_expression_properties prop;
@@ -200,14 +207,8 @@ Reductor<real,RDC>::operator()(const Expr &expr) const {
         auto kernel = cache.find( context() );
 
         if (kernel == cache.end()) {
-            std::ostringstream kernel_name;
-            vector_name_context name_ctx(kernel_name);
-
-            kernel_name << "reduce_";
-            boost::proto::eval(expr, name_ctx);
-
             std::ostringstream increment_line;
-            vector_expr_context expr_ctx(increment_line);
+            vector_expr_context expr_ctx(increment_line, device);
 
             increment_line << "mySum = reduce_operation(mySum, ";
             boost::proto::eval(expr, expr_ctx);
@@ -219,12 +220,12 @@ Reductor<real,RDC>::operator()(const Expr &expr) const {
             typedef typename RDC::template function<real> fun;
             fun::define(source, "reduce_operation");
 
-            construct_preamble(expr, source);
+            construct_preamble(expr, source, device);
 
-            source << "kernel void " << kernel_name.str() << "(\n\t"
+            source << "kernel void vexcl_reductor_kernel(\n\t"
                 << type_name<size_t>() << " n";
 
-            extract_terminals()( expr, declare_expression_parameter(source) );
+            extract_terminals()( expr, declare_expression_parameter(source, device) );
 
             source << ",\n\tglobal " << type_name<real>() << " *g_odata,\n"
                 "\tlocal  " << type_name<real>() << " *sdata\n"
@@ -283,15 +284,15 @@ Reductor<real,RDC>::operator()(const Expr &expr) const {
 
             auto program = build_sources(context, source.str());
 
-            cl::Kernel krn(program, kernel_name.str().c_str());
+            cl::Kernel krn(program, "vexcl_reductor_kernel");
             size_t wgs;
             if (is_cpu(device)) {
                 wgs = 1;
             } else {
                 wgs = kernel_workgroup_size(krn, device);
 
-                size_t smem = device.getInfo<CL_DEVICE_LOCAL_MEM_SIZE>() -
-                    krn.getWorkGroupInfo<CL_KERNEL_LOCAL_MEM_SIZE>(device);
+                size_t smem = static_cast<size_t>(device.getInfo<CL_DEVICE_LOCAL_MEM_SIZE>())
+                            - static_cast<size_t>(krn.getWorkGroupInfo<CL_KERNEL_LOCAL_MEM_SIZE>(device));
                 while(wgs * sizeof(real) > smem)
                     wgs /= 2;
             }
@@ -306,7 +307,7 @@ Reductor<real,RDC>::operator()(const Expr &expr) const {
             size_t g_size = (idx[d + 1] - idx[d]) * w_size;
             auto   lmem   = vex::Local(w_size * sizeof(real));
 
-            uint pos = 0;
+            unsigned pos = 0;
             kernel->second.kernel.setArg(pos++, psize);
 
             extract_terminals()(
@@ -324,26 +325,25 @@ Reductor<real,RDC>::operator()(const Expr &expr) const {
 
     std::fill(hbuf.begin(), hbuf.end(), RDC::template initial<real>());
 
-    for(uint d = 0; d < queue.size(); d++) {
+    for(unsigned d = 0; d < queue.size(); d++) {
         if (prop.part_size(d))
             queue[d].enqueueReadBuffer(dbuf[d], CL_FALSE,
                     0, sizeof(real) * (idx[d + 1] - idx[d]), &hbuf[idx[d]], 0, &event[d]);
     }
 
-    for(uint d = 0; d < queue.size(); d++)
+    for(unsigned d = 0; d < queue.size(); d++)
         if (prop.part_size(d)) event[d].wait();
 
     return RDC::reduce(hbuf.begin(), hbuf.end());
 }
 
-#ifdef VEXCL_MULTIVECTOR_HPP
 template <typename real, class RDC> template <class Expr>
 typename std::enable_if<
     boost::proto::matches<Expr, multivector_expr_grammar>::value,
-    std::array<real, boost::result_of<mutltiex_dimension(Expr)>::type::value>
+    std::array<real, std::result_of<traits::multiex_dimension(Expr)>::type::value>
 >::type
 Reductor<real,RDC>::operator()(const Expr &expr) const {
-    const size_t dim = boost::result_of<mutltiex_dimension(Expr)>::type::value;
+    const size_t dim = std::result_of<traits::multiex_dimension(Expr)>::type::value;
     std::array<real, dim> result;
 
     assign_subexpressions<0, dim, Expr>(result, expr);
@@ -354,9 +354,4 @@ Reductor<real,RDC>::operator()(const Expr &expr) const {
 
 } // namespace vex
 
-#ifdef WIN32
-#  pragma warning(pop)
-#endif
-
-// vim: et
 #endif

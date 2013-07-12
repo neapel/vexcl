@@ -2,8 +2,6 @@
 #  define _GLIBCXX_USE_NANOSLEEP
 #endif
 #include <iostream>
-#include <boost/chrono.hpp>
-#include <boost/thread.hpp>
 #include <mpi.h>
 #include <vexcl/vexcl.hpp>
 #include <vexcl/mpi.hpp>
@@ -47,9 +45,6 @@ int main(int argc, char *argv[]) {
             MPI_Barrier(mpi.comm);
         }
 
-#if BOOST_VERSION >= 105000
-        boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
-#endif
         if (mpi.rank == 0) std::cout << std::endl;
 
         run_test("Allocate mpi::vector", [&]() -> bool {
@@ -239,6 +234,7 @@ int main(int argc, char *argv[]) {
 
                 return rc;
                 });
+
         run_test("Matrix-vector product", [&]() -> bool {
                 const size_t n  = 1024;
                 const size_t m  = 3;
@@ -267,27 +263,29 @@ int main(int argc, char *argv[]) {
                     size_t i = idx % n;
                     size_t j = idx / n;
 
+		    int c = static_cast<int>(idx);
+
                     if (i == 0 || i + 1 == n || j == 0 || j + 1 == n) {
-                        col.push_back(idx);
+                        col.push_back(c);
                         val.push_back(0);
                     } else {
-                        col.push_back(idx - n);
+                        col.push_back(c - n);
                         val.push_back(-1);
 
-                        col.push_back(idx - 1);
+                        col.push_back(c - 1);
                         val.push_back(-1);
 
-                        col.push_back(idx);
+                        col.push_back(c);
                         val.push_back(4.5);
 
-                        col.push_back(idx + 1);
+                        col.push_back(c + 1);
                         val.push_back(-1);
 
-                        col.push_back(idx + n);
+                        col.push_back(c + n);
                         val.push_back(-1);
                     }
 
-                    row.push_back(col.size());
+                    row.push_back(static_cast<int>(col.size()));
                 }
 
                 vex::mpi::SpMat<double, int, int> A(mpi.comm, ctx,

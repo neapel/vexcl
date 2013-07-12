@@ -1,6 +1,10 @@
 #define BOOST_TEST_MODULE VectorView
 #include <valarray>
 #include <boost/test/unit_test.hpp>
+#include <vexcl/vector.hpp>
+#include <vexcl/vector_view.hpp>
+#include <vexcl/element_index.hpp>
+#include <vexcl/reductor.hpp>
 #include "context_setup.hpp"
 
 BOOST_AUTO_TEST_CASE(vector_view_1d)
@@ -13,8 +17,8 @@ BOOST_AUTO_TEST_CASE(vector_view_1d)
     vex::vector<double> X(queue, x);
     vex::vector<double> Y(queue, N);
 
-    cl_ulong size   = N;
-    cl_long  stride = 2;
+    size_t size   = N;
+    size_t stride = 2;
 
     vex::gslice<1> slice(0, &size, &stride);
 
@@ -53,6 +57,9 @@ BOOST_AUTO_TEST_CASE(vector_view_2)
 
 BOOST_AUTO_TEST_CASE(vector_slicer_2d)
 {
+    using vex::range;
+    using vex::_;
+
     const size_t N = 32;
 
     std::vector<cl::CommandQueue> queue(1, ctx.queue(0));
@@ -78,7 +85,7 @@ BOOST_AUTO_TEST_CASE(vector_slicer_2d)
 
 
 
-    auto slice = slicer[vex::range(2, 2, 11)][vex::range(4, 2, 11)];
+    auto slice = slicer[range(2, 2, 11)][range(4, 2, 11)];
 
     Y = slice(X);
 
@@ -92,7 +99,7 @@ BOOST_AUTO_TEST_CASE(vector_slicer_2d)
 
 
 
-    Z = slicer[vex::range()][5](X); // Puth fith column of X into Z;
+    Z = slicer[_][5](X); // Puth fith column of X into Z;
 
     check_sample(Z, [&](size_t idx, double v) { BOOST_CHECK_EQUAL(v, x[5 + N * idx]); });
 }
@@ -130,6 +137,46 @@ BOOST_AUTO_TEST_CASE(reduce_slice)
     X = 1;
 
     BOOST_CHECK_EQUAL(N / 2, sum( slice[vex::range(0, 2, N)](X) ));
+}
+
+BOOST_AUTO_TEST_CASE(assign_to_view) {
+    using vex::range;
+    using vex::_;
+
+    const size_t m = 32;
+    const size_t n = m * m;
+
+    std::vector<cl::CommandQueue> queue(1, ctx.queue(0));
+
+    vex::vector<int> x(queue, n);
+    vex::slicer<1> slicer1(vex::extents[n]);
+    vex::slicer<2> slicer2(vex::extents[m][m]);
+
+    x = 1;
+
+    slicer1[range(1, 2, n)](x) = 2;
+
+    check_sample(x, [&](size_t idx, int v) {
+            BOOST_CHECK_EQUAL(v, idx % 2 + 1);
+            });
+
+    for(size_t i = 0; i < m; ++i)
+        slicer2[_][i](x) = i;
+
+    check_sample(x, [&](size_t idx, int v) {
+            BOOST_CHECK_EQUAL(v, idx % m);
+            });
+
+    vex::vector<size_t> I(queue, m);
+
+    I = vex::element_index() * m;
+
+    vex::permutation first_col(I);
+
+    first_col(x) = 42;
+
+    for(size_t i = 0; i < m; ++i)
+        BOOST_CHECK_EQUAL(x[i * m], 42);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
